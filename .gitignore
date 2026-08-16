@@ -1,0 +1,14 @@
+.superpowers/
+
+# .NET build output
+**/bin/
+**/obj/
+
+# Visual Studio user state
+.vs/
+*.user
+*.suo
+
+# Published artifacts and test results
+artifacts/
+TestResults/
