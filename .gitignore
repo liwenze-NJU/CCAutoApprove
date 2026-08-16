@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 
 # .NET build output
 **/bin/
