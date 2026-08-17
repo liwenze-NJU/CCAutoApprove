@@ -198,6 +198,18 @@ public sealed class JsonLineAuditLogTests
     }
 
     [Fact]
+    public async Task WriteAsync_WhenAuditDependencyThrowsNonCallerCancellation_DoesNotEscape()
+    {
+        using var temp = new TemporaryDirectory();
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.Detailed, new NonCallerCancellingClock());
+
+        await log.WriteAsync(CreateSecretRequest(Guid.NewGuid()),
+            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow), CancellationToken.None);
+
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "logs")));
+    }
+
+    [Fact]
     public async Task WriteAsync_PrivacySafe_NormalizesProjectPathBeforePersisting()
     {
         using var temp = new TemporaryDirectory();
@@ -367,6 +379,11 @@ public sealed class JsonLineAuditLogTests
     private sealed class ThrowingClock : IClock
     {
         public DateTimeOffset UtcNow => throw new IOException("Synthetic audit clock failure.");
+    }
+
+    private sealed class NonCallerCancellingClock : IClock
+    {
+        public DateTimeOffset UtcNow => throw new OperationCanceledException("Synthetic dependency cancellation.");
     }
 
     private sealed class HeldAuditMutex : IAsyncDisposable
