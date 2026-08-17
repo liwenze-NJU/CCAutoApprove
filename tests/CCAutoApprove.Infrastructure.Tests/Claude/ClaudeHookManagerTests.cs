@@ -33,6 +33,99 @@ public sealed class ClaudeHookManagerTests
         }
         """;
 
+    public static TheoryData<string> WrongShapedSettings => new()
+    {
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": {
+            "PermissionRequest": [
+              { "matcher": "", "hooks": [{ "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }] },
+              { "matcher": "", "hooks": "invalid" }
+            ],
+            "PostToolUse": [{ "matcher": "Write", "hooks": [{ "type": "command", "command": "C:\\tools\\format.exe" }] }]
+          },
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": null,
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": { "PermissionRequest": null, "PostToolUse": [] },
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": {
+            "PermissionRequest": [
+              { "matcher": "", "hooks": [{ "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }] },
+              { "matcher": "Bash", "hooks": null }
+            ],
+            "PostToolUse": []
+          },
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": {
+            "PermissionRequest": [
+              { "matcher": 42, "hooks": [{ "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }] }
+            ],
+            "PostToolUse": []
+          },
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": {
+            "PermissionRequest": [
+              { "matcher": "", "hooks": [
+                { "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" },
+                { "type": 42, "command": "C:\\tools\\notify.exe" }
+              ] }
+            ],
+            "PostToolUse": []
+          },
+          "futureSetting": { "nested": true }
+        }
+        """,
+        """
+        {
+          "model": "claude-sonnet-4-5",
+          "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+          "hooks": {
+            "PermissionRequest": [
+              { "matcher": "", "hooks": [
+                { "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" },
+                { "type": "command", "command": 42 }
+              ] }
+            ],
+            "PostToolUse": []
+          },
+          "futureSetting": { "nested": true }
+        }
+        """
+    };
+
     [Fact]
     public async Task InstallAsync_PreservesCompleteExistingSettingsAndAddsPermissionRequestHandler()
     {
@@ -108,6 +201,102 @@ public sealed class ClaudeHookManagerTests
         Assert.Empty(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
     }
 
+    [Theory]
+    [MemberData(nameof(WrongShapedSettings))]
+    public async Task InstallAsync_WhenNestedHookShapeIsInvalid_ThrowsAndPreservesOriginalBytes(string settings)
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = await WriteSettingsAsync(temp, settings);
+        byte[] original = await File.ReadAllBytesAsync(settingsPath);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new ClaudeHookManager(settingsPath, CliPath).InstallAsync(CancellationToken.None));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(settingsPath));
+        Assert.Empty(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
+    [Theory]
+    [MemberData(nameof(WrongShapedSettings))]
+    public async Task UninstallAsync_WhenNestedHookShapeIsInvalid_ThrowsAndPreservesOriginalBytes(string settings)
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = await WriteSettingsAsync(temp, settings);
+        byte[] original = await File.ReadAllBytesAsync(settingsPath);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new ClaudeHookManager(settingsPath, CliPath).UninstallAsync(CancellationToken.None));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(settingsPath));
+        Assert.Empty(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_OwnedCommandUnderNonemptyMatcher_AddsExactWrapperAndPreservesOriginalWrapper()
+    {
+        using var temp = new TemporaryDirectory();
+        const string settings = """
+            {
+              "model": "claude-sonnet-4-5",
+              "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+              "hooks": {
+                "PermissionRequest": [
+                  {
+                    "matcher": "Bash",
+                    "hooks": [
+                      { "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" },
+                      { "type": "command", "command": "C:\\tools\\notify.exe" }
+                    ]
+                  }
+                ],
+                "PostToolUse": []
+              },
+              "futureSetting": { "nested": true }
+            }
+            """;
+        string settingsPath = await WriteSettingsAsync(temp, settings);
+        var manager = new ClaudeHookManager(settingsPath, CliPath);
+        Assert.False(await manager.IsInstalledAsync(CancellationToken.None));
+
+        await manager.InstallAsync(CancellationToken.None);
+
+        JsonArray wrappers = JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))!
+            ["hooks"]!["PermissionRequest"]!.AsArray();
+        Assert.Equal(2, wrappers.Count);
+        Assert.Equal("Bash", (string?)wrappers[0]!["matcher"]);
+        Assert.Equal(ManagedCommand, (string?)wrappers[0]!["hooks"]![0]!["command"]);
+        Assert.Equal("C:\\tools\\notify.exe", (string?)wrappers[0]!["hooks"]![1]!["command"]);
+        Assert.Equal("", (string?)wrappers[1]!["matcher"]);
+        Assert.Equal(ManagedCommand, (string?)wrappers[1]!["hooks"]![0]!["command"]);
+        Assert.True(await manager.IsInstalledAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task UninstallAsync_OwnedCommandUnderNonemptyMatcher_PreservesOriginalBytes()
+    {
+        using var temp = new TemporaryDirectory();
+        const string settings = """
+            {
+              "model": "claude-sonnet-4-5",
+              "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+              "hooks": {
+                "PermissionRequest": [
+                  { "matcher": "Bash", "hooks": [{ "type": "command", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }] }
+                ],
+                "PostToolUse": []
+              },
+              "futureSetting": { "nested": true }
+            }
+            """;
+        string settingsPath = await WriteSettingsAsync(temp, settings);
+        byte[] original = await File.ReadAllBytesAsync(settingsPath);
+
+        await new ClaudeHookManager(settingsPath, CliPath).UninstallAsync(CancellationToken.None);
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(settingsPath));
+        Assert.Empty(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
     [Fact]
     public async Task UninstallAsync_RemovesOnlyExactManagedHookAndPrunesOnlyEmptyManagedContainers()
     {
@@ -124,7 +313,7 @@ public sealed class ClaudeHookManagerTests
                       { "type": "COMMAND", "command": "\"c:\\program files\\ccautoapprove\\cli\\..\\cli\\ccautoapprove.cli.exe\" HOOK" },
                       { "type": "command", "command": "C:\\tools\\notify.exe CCAutoApprove" },
                       { "type": "prompt", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" },
-                      { "type": 42, "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }
+                      { "type": "future", "command": "\"C:\\Program Files\\CCAutoApprove\\cli\\CCAutoApprove.Cli.exe\" hook" }
                     ]
                   },
                   {
@@ -155,7 +344,7 @@ public sealed class ClaudeHookManagerTests
         Assert.Equal(3, permissionRequests.Count);
         Assert.Equal("C:\\tools\\notify.exe CCAutoApprove", (string?)permissionRequests[0]!["hooks"]![0]!["command"]);
         Assert.Equal("prompt", (string?)permissionRequests[0]!["hooks"]![1]!["type"]);
-        Assert.Equal(42, (int)permissionRequests[0]!["hooks"]![2]!["type"]!);
+        Assert.Equal("future", (string?)permissionRequests[0]!["hooks"]![2]!["type"]);
         Assert.Equal("C:\\tools\\review.exe", (string?)permissionRequests[1]!["hooks"]![0]!["command"]);
         Assert.Equal("EmptyUserHook", (string?)permissionRequests[2]!["matcher"]);
         Assert.Empty(permissionRequests[2]!["hooks"]!.AsArray());

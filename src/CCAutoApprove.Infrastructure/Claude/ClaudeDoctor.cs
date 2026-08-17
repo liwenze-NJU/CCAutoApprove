@@ -99,7 +99,7 @@ public sealed class ClaudeDoctor : IHookHealthService
                 return null;
             }
 
-            if (!HasSupportedHookStructure(settings))
+            if (!ClaudeHookManager.HasSupportedHookStructure(settings))
             {
                 checks.Add(Error("ClaudeSettingsValid", "Claude settings contain an unsupported Hook structure."));
                 return null;
@@ -119,7 +119,7 @@ public sealed class ClaudeDoctor : IHookHealthService
     {
         JsonNode?[] candidates = settings is null
             ? []
-            : ClaudeHookManager.EnumeratePermissionHooks(settings).Where(IsCCAutoApproveHookCandidate).ToArray();
+            : ClaudeHookManager.EnumerateManagedWrapperHooks(settings).Where(IsCCAutoApproveHookCandidate).ToArray();
         checks.Add(candidates.Length > 0
             ? Pass("HookInstalled", "CCAutoApprove PermissionRequest Hook is installed.")
             : Error("HookInstalled", "CCAutoApprove PermissionRequest Hook is not installed."));
@@ -133,7 +133,7 @@ public sealed class ClaudeDoctor : IHookHealthService
     private void AddCommandPathAndDisabledChecks(ICollection<DoctorCheck> checks, JsonObject? settings)
     {
         bool commandMatches = settings is not null
-            && ClaudeHookManager.EnumeratePermissionHooks(settings)
+            && ClaudeHookManager.EnumerateManagedWrapperHooks(settings)
                 .Any(hook => ClaudeHookManager.IsOwnedHook(hook, managedCommand));
         checks.Add(commandMatches
             ? Pass("HookCommandPathMatches", "Hook command references the current executable.")
@@ -208,9 +208,9 @@ public sealed class ClaudeDoctor : IHookHealthService
     private static bool IsCCAutoApproveHookCandidate(JsonNode? node)
     {
         if (node is not JsonObject hook
-            || !string.Equals((string?)hook["type"], "command", StringComparison.OrdinalIgnoreCase)
-            || hook["command"] is not JsonValue commandValue
-            || !commandValue.TryGetValue(out string? command)
+            || !ClaudeHookManager.TryReadString(hook["type"], out string? type)
+            || !string.Equals(type, "command", StringComparison.OrdinalIgnoreCase)
+            || !ClaudeHookManager.TryReadString(hook["command"], out string? command)
             || string.IsNullOrWhiteSpace(command))
         {
             return false;
@@ -224,33 +224,6 @@ public sealed class ClaudeDoctor : IHookHealthService
 
         string path = command[1..^suffix.Length];
         return string.Equals(Path.GetFileName(path), "CCAutoApprove.Cli.exe", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool HasSupportedHookStructure(JsonObject settings)
-    {
-        if (settings["hooks"] is null)
-        {
-            return true;
-        }
-
-        if (settings["hooks"] is not JsonObject hooks)
-        {
-            return false;
-        }
-
-        if (hooks["PermissionRequest"] is null)
-        {
-            return true;
-        }
-
-        if (hooks["PermissionRequest"] is not JsonArray permissionRequests)
-        {
-            return false;
-        }
-
-        return permissionRequests.All(entry =>
-            entry is JsonObject entryObject
-            && entryObject["hooks"] is JsonArray);
     }
 
     private static DoctorCheck Pass(string code, string message) => new(code, DoctorSeverity.Pass, message);

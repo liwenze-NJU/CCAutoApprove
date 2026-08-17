@@ -23,6 +23,7 @@ public sealed class ClaudeHookManager
     public async Task InstallAsync(CancellationToken cancellationToken)
     {
         (JsonObject root, bool existed) = await LoadAsync(missingIsEmpty: true, cancellationToken);
+        EnsureSupportedHookStructure(root);
         JsonObject hooks = GetOrCreateObject(root, "hooks");
         JsonArray permissionRequests = GetOrCreateArray(hooks, "PermissionRequest");
 
@@ -32,13 +33,15 @@ public sealed class ClaudeHookManager
         {
             if (entryNode is not JsonObject entry || entry["hooks"] is not JsonArray entryHooks)
             {
-                continue;
+                throw InvalidStructure();
             }
 
+            bool isManagedWrapper = TryReadString(entry["matcher"], out string? matcher)
+                && string.Equals(matcher, string.Empty, StringComparison.Ordinal);
             bool removedOwnedHook = false;
             foreach (JsonNode? hookNode in entryHooks.ToArray())
             {
-                if (!IsOwnedHook(hookNode, managedCommand))
+                if (!isManagedWrapper || !IsOwnedHook(hookNode, managedCommand))
                 {
                     continue;
                 }
@@ -93,6 +96,7 @@ public sealed class ClaudeHookManager
             return;
         }
 
+        EnsureSupportedHookStructure(root);
         if (root["hooks"] is null)
         {
             return;
@@ -118,13 +122,15 @@ public sealed class ClaudeHookManager
         {
             if (entryNode is not JsonObject entry || entry["hooks"] is not JsonArray entryHooks)
             {
-                continue;
+                throw InvalidStructure();
             }
 
+            bool isManagedWrapper = TryReadString(entry["matcher"], out string? matcher)
+                && string.Equals(matcher, string.Empty, StringComparison.Ordinal);
             bool removedOwnedHook = false;
             foreach (JsonNode? hookNode in entryHooks.ToArray())
             {
-                if (IsOwnedHook(hookNode, managedCommand))
+                if (isManagedWrapper && IsOwnedHook(hookNode, managedCommand))
                 {
                     entryHooks.Remove(hookNode);
                     removedOwnedHook = true;
@@ -161,7 +167,8 @@ public sealed class ClaudeHookManager
         try
         {
             (JsonObject root, bool existed) = await LoadAsync(missingIsEmpty: true, cancellationToken);
-            return existed && EnumeratePermissionHooks(root).Any(hook => IsOwnedHook(hook, managedCommand));
+            EnsureSupportedHookStructure(root);
+            return existed && EnumerateManagedWrapperHooks(root).Any(hook => IsOwnedHook(hook, managedCommand));
         }
         catch (InvalidDataException)
         {
@@ -181,17 +188,22 @@ public sealed class ClaudeHookManager
         && string.Equals(type, "command", StringComparison.OrdinalIgnoreCase)
         && string.Equals(normalizedCandidate, command, StringComparison.OrdinalIgnoreCase);
 
-    internal static IEnumerable<JsonNode?> EnumeratePermissionHooks(JsonObject root)
+    internal static IEnumerable<JsonNode?> EnumerateManagedWrapperHooks(JsonObject root)
     {
-        if (root["hooks"] is not JsonObject hooks
-            || hooks["PermissionRequest"] is not JsonArray permissionRequests)
+        if (!TryGetProperty(root, "hooks", out JsonNode? hooksNode)
+            || hooksNode is not JsonObject hooks
+            || !TryGetProperty(hooks, "PermissionRequest", out JsonNode? permissionRequestNode)
+            || permissionRequestNode is not JsonArray permissionRequests)
         {
             yield break;
         }
 
         foreach (JsonNode? entry in permissionRequests)
         {
-            if (entry is not JsonObject entryObject || entryObject["hooks"] is not JsonArray entryHooks)
+            if (entry is not JsonObject entryObject
+                || !TryReadString(entryObject["matcher"], out string? matcher)
+                || !string.Equals(matcher, string.Empty, StringComparison.Ordinal)
+                || entryObject["hooks"] is not JsonArray entryHooks)
             {
                 continue;
             }
@@ -298,11 +310,81 @@ public sealed class ClaudeHookManager
     private static InvalidDataException InvalidStructure() =>
         new("Claude settings JSON has an unsupported structure.");
 
-    private static bool TryReadString(JsonNode? node, out string? value)
+    internal static bool HasSupportedHookStructure(JsonObject root)
+    {
+        if (!TryGetProperty(root, "hooks", out JsonNode? hooksNode))
+        {
+            return true;
+        }
+
+        if (hooksNode is not JsonObject hooks)
+        {
+            return false;
+        }
+
+        if (!TryGetProperty(hooks, "PermissionRequest", out JsonNode? permissionRequestNode))
+        {
+            return true;
+        }
+
+        if (permissionRequestNode is not JsonArray permissionRequests)
+        {
+            return false;
+        }
+
+        foreach (JsonNode? entryNode in permissionRequests)
+        {
+            if (entryNode is not JsonObject entry
+                || !TryGetRequiredString(entry, "matcher", out _)
+                || !TryGetProperty(entry, "hooks", out JsonNode? entryHooksNode)
+                || entryHooksNode is not JsonArray entryHooks)
+            {
+                return false;
+            }
+
+            foreach (JsonNode? hookNode in entryHooks)
+            {
+                if (hookNode is not JsonObject hook
+                    || !TryGetRequiredString(hook, "type", out string? type))
+                {
+                    return false;
+                }
+
+                bool hasCommand = TryGetProperty(hook, "command", out JsonNode? commandNode);
+                if ((hasCommand && !TryReadString(commandNode, out _))
+                    || (string.Equals(type, "command", StringComparison.OrdinalIgnoreCase) && !hasCommand))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    internal static bool TryReadString(JsonNode? node, out string? value)
     {
         value = null;
         return node is JsonValue jsonValue && jsonValue.TryGetValue(out value);
     }
+
+    private static void EnsureSupportedHookStructure(JsonObject root)
+    {
+        if (!HasSupportedHookStructure(root))
+        {
+            throw InvalidStructure();
+        }
+    }
+
+    private static bool TryGetRequiredString(JsonObject parent, string propertyName, out string? value)
+    {
+        value = null;
+        return TryGetProperty(parent, propertyName, out JsonNode? node)
+            && TryReadString(node, out value);
+    }
+
+    private static bool TryGetProperty(JsonObject parent, string propertyName, out JsonNode? value) =>
+        parent.TryGetPropertyValue(propertyName, out value);
 
     private static bool TryNormalizeManagedCommand(string? command, out string? normalizedCommand)
     {

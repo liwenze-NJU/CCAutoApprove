@@ -85,6 +85,61 @@ public sealed class ClaudeDoctorTests
         Assert.All(checks, check => Assert.DoesNotContain(secretMarker, check.Message, StringComparison.Ordinal));
     }
 
+    [Theory]
+    [MemberData(nameof(ClaudeHookManagerTests.WrongShapedSettings), MemberType = typeof(ClaudeHookManagerTests))]
+    public async Task RunAsync_NestedHookShapeIsInvalid_ReturnsTenStableChecksAndIsNotOperational(string settings)
+    {
+        using var environment = await DoctorEnvironment.CreateAsync();
+        await File.WriteAllTextAsync(environment.ClaudeSettingsPath, settings);
+        ClaudeDoctor doctor = environment.CreateDoctor();
+
+        IReadOnlyList<DoctorCheck> checks = await doctor.RunAsync(CancellationToken.None);
+
+        Assert.Equal(
+            [
+                "ClaudeSettingsReadable", "ClaudeSettingsValid", "HookInstalled", "HookNotDuplicated",
+                "HookExecutableExists", "HookCommandPathMatches", "HooksNotDisabled", "DataDirectoryWritable",
+                "RuntimeStateValid", "SelectedProjectExists"
+            ],
+            checks.Select(check => check.Code));
+        Assert.Equal(DoctorSeverity.Error,
+            Assert.Single(checks, check => check.Code == "ClaudeSettingsValid").Severity);
+        Assert.False(await doctor.IsOperationalAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RunAsync_OwnedCommandUnderNonemptyMatcher_ReportsHookNotInstalled()
+    {
+        using var environment = await DoctorEnvironment.CreateAsync();
+        await File.WriteAllTextAsync(environment.ClaudeSettingsPath, $$"""
+            {
+              "model": "claude-sonnet-4-5",
+              "permissions": { "allow": ["Bash(dotnet test:*)"], "deny": [] },
+              "disableAllHooks": false,
+              "hooks": {
+                "PermissionRequest": [
+                  {
+                    "matcher": "Bash",
+                    "hooks": [
+                      { "type": "command", "command": {{System.Text.Json.JsonSerializer.Serialize($"\"{environment.CliPath}\" hook")}} }
+                    ]
+                  }
+                ],
+                "PostToolUse": []
+              }
+            }
+            """);
+        ClaudeDoctor doctor = environment.CreateDoctor();
+
+        IReadOnlyDictionary<string, DoctorCheck> checks = (await doctor.RunAsync(CancellationToken.None))
+            .ToDictionary(check => check.Code);
+
+        Assert.Equal(DoctorSeverity.Error, checks["HookInstalled"].Severity);
+        Assert.Equal(DoctorSeverity.Error, checks["HookNotDuplicated"].Severity);
+        Assert.Equal(DoctorSeverity.Error, checks["HookCommandPathMatches"].Severity);
+        Assert.False(await doctor.IsOperationalAsync(CancellationToken.None));
+    }
+
     [Fact]
     public async Task RunAsync_MissingRuntimeAndSelectedProject_AreWarningsAndDoNotMakeHookInoperable()
     {
