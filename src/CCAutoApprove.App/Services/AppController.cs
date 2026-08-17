@@ -130,14 +130,38 @@ public sealed class AppController
             await settingsStore.SaveAsync(updatedSettings, cancellationToken).ConfigureAwait(false);
             settings = updatedSettings;
             await heartbeatService.StopAsync().ConfigureAwait(false);
-            await heartbeatService.EnableAsync(project, cancellationToken).ConfigureAwait(false);
-            lock (stateLock)
+            try
             {
-                selectedProject = project;
-                isEnabled = true;
-                errorCode = null;
+                await heartbeatService.EnableAsync(project, cancellationToken).ConfigureAwait(false);
+                heartbeatService.Start();
+                lock (stateLock)
+                {
+                    selectedProject = project;
+                    isEnabled = true;
+                    errorCode = null;
+                }
             }
-            heartbeatService.Start();
+            catch
+            {
+                Task disableTask = heartbeatService.DisableAndStopAsync();
+                lock (stateLock)
+                {
+                    selectedProject = project;
+                    isEnabled = false;
+                    errorCode = HeartbeatWriteFailed;
+                }
+                raiseStateChanged = true;
+
+                try
+                {
+                    await disableTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The original enable failure remains the operation result; safety state is already disabled.
+                }
+                throw;
+            }
             raiseStateChanged = true;
             return true;
         }
@@ -153,30 +177,25 @@ public sealed class AppController
 
     public async Task PauseAsync(CancellationToken cancellationToken)
     {
-        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await operationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         bool changed = false;
         try
         {
             EnsureInitialized();
             if (!IsEnabled)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 return;
             }
 
-            try
+            lock (stateLock)
             {
-                await heartbeatService.DisableAsync(cancellationToken).ConfigureAwait(false);
+                isEnabled = false;
+                errorCode = null;
             }
-            finally
-            {
-                lock (stateLock)
-                {
-                    isEnabled = false;
-                    errorCode = null;
-                }
-                changed = true;
-                await heartbeatService.StopAsync().ConfigureAwait(false);
-            }
+            changed = true;
+            await heartbeatService.DisableAndStopAsync().ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         finally
         {
@@ -190,31 +209,35 @@ public sealed class AppController
 
     public async Task ShutdownAsync(CancellationToken cancellationToken)
     {
-        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await operationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         bool changed = false;
         try
         {
             if (!isInitialized || isShutdown)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 return;
             }
 
             bool disabledStateSaved = false;
+            lock (stateLock)
+            {
+                isEnabled = false;
+            }
+            changed = true;
             try
             {
-                await heartbeatService.DisableAsync(cancellationToken).ConfigureAwait(false);
+                await heartbeatService.DisableAndStopAsync().ConfigureAwait(false);
                 disabledStateSaved = true;
             }
             finally
             {
                 lock (stateLock)
                 {
-                    isEnabled = false;
                     isShutdown = disabledStateSaved;
                 }
-                changed = true;
-                await heartbeatService.StopAsync().ConfigureAwait(false);
             }
+            cancellationToken.ThrowIfCancellationRequested();
         }
         finally
         {

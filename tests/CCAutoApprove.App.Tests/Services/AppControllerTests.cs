@@ -95,6 +95,35 @@ public sealed class AppControllerTests
     }
 
     [Fact]
+    public async Task EnableAsync_WhenAlreadyEnabledAndReplacementRuntimeWriteFails_DisablesAndStops()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        environment.RuntimeStore.FailNextWrites = 1;
+        environment.RuntimeStore.OnAttempt = state =>
+            environment.RuntimeStore.BlockWrites = !state.Enabled;
+
+        Task<bool> enableTask = environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        await environment.RuntimeStore.WaitForBlockedWriteAsync();
+        bool controllerEnabledDuringCleanup = environment.Controller.IsEnabled;
+        bool heartbeatEnabledDuringCleanup = environment.Heartbeat.IsEnabled;
+        bool heartbeatRunningDuringCleanup = environment.Heartbeat.IsRunning;
+        environment.RuntimeStore.BlockWrites = false;
+        environment.RuntimeStore.ReleaseBlockedWrite();
+
+        await Assert.ThrowsAsync<IOException>(() => enableTask);
+
+        Assert.False(controllerEnabledDuringCleanup);
+        Assert.False(heartbeatEnabledDuringCleanup);
+        Assert.False(heartbeatRunningDuringCleanup);
+        Assert.False(environment.Controller.IsEnabled);
+        Assert.False(environment.Heartbeat.IsEnabled);
+        Assert.False(environment.Heartbeat.IsRunning);
+        Assert.False(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
+    }
+
+    [Fact]
     public async Task PauseAsync_WhenEnabled_WritesDisabledAndStopsHeartbeat()
     {
         await using var environment = CreateEnvironment();
@@ -136,6 +165,46 @@ public sealed class AppControllerTests
         Assert.False(environment.Controller.IsEnabled);
         Assert.False(environment.Heartbeat.IsEnabled);
         Assert.False(environment.Heartbeat.IsRunning);
+    }
+
+    [Fact]
+    public async Task PauseAsync_WithPreCanceledToken_DisablesAndStopsBeforeReportingCancellation()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            environment.Controller.PauseAsync(cancellation.Token));
+
+        Assert.False(environment.Controller.IsEnabled);
+        Assert.False(environment.Heartbeat.IsEnabled);
+        Assert.False(environment.Heartbeat.IsRunning);
+        Assert.False(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
+    }
+
+    [Fact]
+    public async Task PauseAsync_WhenCanceledAtHeartbeatWriteGate_DisablesAndStopsBeforeReportingCancellation()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        environment.RuntimeStore.BlockWrites = true;
+        await environment.Timer.TickAsync();
+        await environment.RuntimeStore.WaitForBlockedWriteAsync();
+        using var cancellation = new CancellationTokenSource();
+
+        Task pauseTask = environment.Controller.PauseAsync(cancellation.Token);
+        environment.RuntimeStore.BlockWrites = false;
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pauseTask);
+        Assert.False(environment.Controller.IsEnabled);
+        Assert.False(environment.Heartbeat.IsEnabled);
+        Assert.False(environment.Heartbeat.IsRunning);
+        Assert.False(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
     }
 
     [Fact]
@@ -252,6 +321,24 @@ public sealed class AppControllerTests
         Assert.False(environment.Controller.IsEnabled);
         Assert.False(environment.Heartbeat.IsEnabled);
         Assert.False(environment.Heartbeat.IsRunning);
+    }
+
+    [Fact]
+    public async Task ShutdownAsync_WithPreCanceledToken_DisablesAndStopsBeforeReportingCancellation()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            environment.Controller.ShutdownAsync(cancellation.Token));
+
+        Assert.False(environment.Controller.IsEnabled);
+        Assert.False(environment.Heartbeat.IsEnabled);
+        Assert.False(environment.Heartbeat.IsRunning);
+        Assert.False(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
     }
 
     private static TestEnvironment CreateEnvironment(

@@ -122,23 +122,25 @@ public sealed class HeartbeatService : IAsyncDisposable
         }
     }
 
-    public async Task DisableAsync(CancellationToken cancellationToken)
+    public async Task DisableAndStopAsync()
     {
         EnsureInitialized();
 
-        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        string project;
+        Guid currentInstanceId;
+        lock (stateLock)
+        {
+            project = selectedProject;
+            currentInstanceId = instanceId;
+            isEnabled = false;
+        }
+
+        await StopAsync().ConfigureAwait(false);
+        await writeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            string project;
-            Guid currentInstanceId;
-            lock (stateLock)
-            {
-                project = selectedProject;
-                currentInstanceId = instanceId;
-                isEnabled = false;
-            }
             await runtimeStateStore.SaveAsync(
-                CreateState(enabled: false, project, currentInstanceId), cancellationToken).ConfigureAwait(false);
+                CreateState(enabled: false, project, currentInstanceId), CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
