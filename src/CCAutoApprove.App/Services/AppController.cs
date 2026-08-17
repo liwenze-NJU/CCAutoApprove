@@ -133,12 +133,38 @@ public sealed class AppController
             try
             {
                 await heartbeatService.EnableAsync(project, cancellationToken).ConfigureAwait(false);
-                heartbeatService.Start();
                 lock (stateLock)
                 {
                     selectedProject = project;
                     isEnabled = true;
                     errorCode = null;
+                }
+                heartbeatService.Start();
+                if (!heartbeatService.IsEnabled || !heartbeatService.IsRunning)
+                {
+                    Task? disableTask = heartbeatService.IsEnabled
+                        ? heartbeatService.DisableAndStopAsync()
+                        : null;
+                    lock (stateLock)
+                    {
+                        isEnabled = false;
+                        errorCode ??= HeartbeatWriteFailed;
+                    }
+
+                    if (disableTask is not null)
+                    {
+                        try
+                        {
+                            await disableTask.ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // In-memory state and loop ownership are already disabled.
+                        }
+                    }
+
+                    raiseStateChanged = true;
+                    return false;
                 }
             }
             catch

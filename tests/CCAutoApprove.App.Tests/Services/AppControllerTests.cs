@@ -79,6 +79,32 @@ public sealed class AppControllerTests
     }
 
     [Fact]
+    public async Task EnableAsync_WhenFirstHeartbeatTickFaultsSynchronously_RemainsDisabledWithTypedError()
+    {
+        var runtimeStore = new RecordingRuntimeStateStore();
+        var timer = new ImmediateFirstTickHeartbeatTimer(() => runtimeStore.FailNextWrites = 2);
+        var directory = new FakeDirectoryService(exists: true, () => { });
+        await using var heartbeat = new HeartbeatService(runtimeStore,
+            new FakeClock(new DateTimeOffset(2026, 8, 17, 2, 0, 0, TimeSpan.Zero)),
+            new FakeCurrentProcessInfo(7123, ProcessStartUtc), directory, timer);
+        var controller = new AppController(
+            new FakeSettingsStore(new PersistentSettings(), () => { }),
+            directory,
+            new FakeHookHealthService(operational: true, () => { }),
+            heartbeat);
+        await controller.InitializeAsync(CancellationToken.None);
+
+        bool enabled = await controller.EnableAsync(ExistingProject, CancellationToken.None);
+
+        Assert.False(enabled);
+        Assert.False(controller.IsEnabled);
+        Assert.False(heartbeat.IsEnabled);
+        Assert.False(heartbeat.IsRunning);
+        Assert.Equal(AppController.HeartbeatWriteFailed, controller.ErrorCode);
+        Assert.False(runtimeStore.SuccessfulStates[^1].Enabled);
+    }
+
+    [Fact]
     public async Task EnableAsync_WhenAlreadyEnabledAndNewSelectionIsInvalid_PreservesActiveState()
     {
         await using var environment = CreateEnvironment();
@@ -389,6 +415,25 @@ public sealed class AppControllerTests
         }
 
         public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    private sealed class ImmediateFirstTickHeartbeatTimer(Action onFirstTick) : IHeartbeatTimer
+    {
+        private int waitCount;
+
+        public ValueTask<bool> WaitForNextTickAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Interlocked.Increment(ref waitCount) == 1)
+            {
+                onFirstTick();
+                return ValueTask.FromResult(true);
+            }
+
+            return ValueTask.FromResult(false);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class FakeSettingsStore(PersistentSettings settings, Action onSave) : ISettingsStore
