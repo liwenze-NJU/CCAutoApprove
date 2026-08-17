@@ -2,7 +2,7 @@ using CCAutoApprove.Cli;
 
 try
 {
-    Environment.ExitCode = await CliApplication.CreateProduction().RunAsync(
+    Environment.ExitCode = await CliApplication.RunProductionAsync(
         args,
         Console.OpenStandardInput(),
         Console.OpenStandardOutput(),

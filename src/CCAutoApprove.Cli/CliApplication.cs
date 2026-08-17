@@ -17,6 +17,8 @@ public sealed class CliApplication(
     RuntimeStateValidator runtimeStateValidator,
     ClaudeDoctor doctor)
 {
+    private static readonly TimeSpan HookTotalTimeout = TimeSpan.FromMilliseconds(1_000);
+
     public async Task<int> RunAsync(
         string[] args,
         Stream input,
@@ -39,7 +41,52 @@ public sealed class CliApplication(
         };
     }
 
-    public static CliApplication CreateProduction()
+    public static async Task<int> RunProductionAsync(
+        string[] args,
+        Stream input,
+        Stream output,
+        TextWriter error,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task<CliApplication>>? applicationFactory = null)
+    {
+        applicationFactory ??= CreateProductionAsync;
+        bool isHook = string.Equals(
+            args.FirstOrDefault(),
+            "hook",
+            StringComparison.OrdinalIgnoreCase);
+
+        if (!isHook)
+        {
+            try
+            {
+                CliApplication application = await applicationFactory(cancellationToken);
+                return await application.RunAsync(args, input, output, error, cancellationToken);
+            }
+            catch
+            {
+                await error.WriteLineAsync("CCAutoApprove: command initialization failed.");
+                return 1;
+            }
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(HookTotalTimeout);
+        try
+        {
+            Task<CliApplication> initialization = Task.Run(
+                () => applicationFactory(timeout.Token),
+                timeout.Token);
+            ObserveFault(initialization);
+            CliApplication application = await initialization.WaitAsync(timeout.Token);
+            return await application.RunAsync(args, input, output, error, timeout.Token);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static async Task<CliApplication> CreateProductionAsync(CancellationToken cancellationToken)
     {
         var paths = new AppPaths();
         var clock = new SystemClock();
@@ -50,7 +97,9 @@ public sealed class CliApplication(
             stateValidator,
             new WindowsProjectMatcher(),
             new AlwaysAllowDecisionProvider());
-        PersistentSettings settings = LoadSettingsOrPrivacySafeDefault(paths.SettingsPath);
+        PersistentSettings settings = await LoadSettingsOrPrivacySafeDefaultAsync(
+            paths.SettingsPath,
+            cancellationToken);
         IAuditLog auditLog = settings.AuditDetailLevel == AuditDetailLevel.Disabled
             ? new NullAuditLog()
             : new JsonLineAuditLog(paths, settings, clock);
@@ -140,14 +189,17 @@ public sealed class CliApplication(
         return 2;
     }
 
-    private static PersistentSettings LoadSettingsOrPrivacySafeDefault(string settingsPath)
+    private static async Task<PersistentSettings> LoadSettingsOrPrivacySafeDefaultAsync(
+        string settingsPath,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return new JsonSettingsStore(settingsPath)
-                .LoadAsync(CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
+            return await new JsonSettingsStore(settingsPath).LoadAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -180,5 +232,14 @@ public sealed class CliApplication(
 
         return Environment.ProcessPath
             ?? throw new InvalidOperationException("The CLI executable path is unavailable.");
+    }
+
+    private static void ObserveFault(Task task)
+    {
+        _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }

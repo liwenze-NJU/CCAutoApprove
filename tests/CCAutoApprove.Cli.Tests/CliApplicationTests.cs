@@ -37,6 +37,62 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task RunProductionHook_WhenInitializationBlocks_ReturnsSafelyWithinTheTotalDeadline()
+    {
+        using var input = new MemoryStream(ValidFixtureBytes);
+        using var output = new MemoryStream();
+        using var error = new StringWriter();
+        using var releaseInitialization = new ManualResetEventSlim(initialState: false);
+        var initializationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var initializationFinished = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Task<CliApplication> BlockingFactory(CancellationToken cancellationToken)
+        {
+            initializationStarted.TrySetResult();
+            try
+            {
+                releaseInitialization.Wait();
+                return Task.FromResult(CreateApp(ApprovalDecision.Ask("unused")));
+            }
+            finally
+            {
+                initializationFinished.TrySetResult();
+            }
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        Task<int> runTask = Task.Run(() => CliApplication.RunProductionAsync(
+            ["hook"],
+            input,
+            output,
+            error,
+            CancellationToken.None,
+            BlockingFactory));
+
+        try
+        {
+            await initializationStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            int exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+            stopwatch.Stop();
+            Assert.Equal(0, exitCode);
+            Assert.Equal(0, output.Length);
+            Assert.Equal(string.Empty, error.ToString());
+            Assert.InRange(
+                stopwatch.Elapsed,
+                TimeSpan.FromMilliseconds(850),
+                TimeSpan.FromMilliseconds(1_500));
+        }
+        finally
+        {
+            releaseInitialization.Set();
+            await initializationFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+    }
+
+    [Fact]
     public async Task Hook_WhenDecisionIsAllow_WritesExactlyOneAllowObject()
     {
         using var input = new MemoryStream(ValidFixtureBytes);
@@ -52,6 +108,59 @@ public sealed class CliApplicationTests : IDisposable
             "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}",
             Encoding.UTF8.GetString(output.ToArray()));
         Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public async Task Hook_WhenDecisionIsAllow_PerformsOneCompleteSynchronousOutputWrite()
+    {
+        using var input = new MemoryStream(ValidFixtureBytes);
+        using var output = new RecordingWriteStream();
+        using var error = new StringWriter();
+        CliApplication app = CreateApp(ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow));
+
+        int exitCode = await app.RunAsync(
+            ["hook"], input, output, error, CancellationToken.None);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, output.SynchronousWriteCount);
+        Assert.Equal(0, output.AsynchronousWriteCount);
+        Assert.Equal(
+            "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}",
+            Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    [Fact]
+    public async Task Hook_WhenAuditBlocksAndFaultsLater_ReturnsAtDeadlineWithoutOutput()
+    {
+        using var input = new MemoryStream(ValidFixtureBytes);
+        using var output = new MemoryStream();
+        using var error = new StringWriter();
+        using var auditLog = new BlockingFaultingAuditLog();
+        CliApplication app = CreateApp(
+            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow), auditLog);
+        var stopwatch = Stopwatch.StartNew();
+        Task<int> runTask = Task.Run(() => app.RunAsync(
+            ["hook"], input, output, error, CancellationToken.None));
+
+        try
+        {
+            await auditLog.Started.WaitAsync(TimeSpan.FromSeconds(1));
+            int exitCode = await runTask.WaitAsync(TimeSpan.FromMilliseconds(1_700));
+
+            stopwatch.Stop();
+            Assert.Equal(0, exitCode);
+            Assert.Equal(0, output.Length);
+            Assert.Equal(string.Empty, error.ToString());
+            Assert.InRange(
+                stopwatch.Elapsed,
+                TimeSpan.FromMilliseconds(850),
+                TimeSpan.FromMilliseconds(1_500));
+        }
+        finally
+        {
+            auditLog.Release();
+            await auditLog.Finished.WaitAsync(TimeSpan.FromSeconds(1));
+        }
     }
 
     [Fact]
@@ -170,7 +279,7 @@ public sealed class CliApplicationTests : IDisposable
 
     private CliApplication CreateApp(
         ApprovalDecision decision,
-        CapturingAuditLog? auditLog = null)
+        IAuditLog? auditLog = null)
     {
         return CreateApp(decision, out _, auditLog);
     }
@@ -178,7 +287,7 @@ public sealed class CliApplicationTests : IDisposable
     private CliApplication CreateApp(
         ApprovalDecision decision,
         out ClaudeHookManager hookManager,
-        CapturingAuditLog? auditLog = null)
+        IAuditLog? auditLog = null)
     {
         Directory.CreateDirectory(tempDirectory);
         string claudeSettingsPath = Path.Combine(tempDirectory, "claude-settings.json");
@@ -268,6 +377,106 @@ public sealed class CliApplicationTests : IDisposable
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class BlockingFaultingAuditLog : IAuditLog, IDisposable
+    {
+        private readonly ManualResetEventSlim release = new(initialState: false);
+        private readonly TaskCompletionSource started = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource finished = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => started.Task;
+        public Task Finished => finished.Task;
+
+        public Task WriteAsync(
+            ApprovalRequest request,
+            ApprovalDecision decision,
+            CancellationToken cancellationToken)
+        {
+            started.TrySetResult();
+            try
+            {
+                release.Wait();
+                return Task.FromException(new IOException("late audit failure"));
+            }
+            finally
+            {
+                finished.TrySetResult();
+            }
+        }
+
+        public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(
+            int maximumCount,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<AuditRecord>>([]);
+
+        public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public void Release() => release.Set();
+
+        public void Dispose() => release.Dispose();
+    }
+
+    private sealed class RecordingWriteStream : Stream
+    {
+        private readonly MemoryStream contents = new();
+
+        public int SynchronousWriteCount { get; private set; }
+        public int AsynchronousWriteCount { get; private set; }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => contents.Length;
+        public override long Position
+        {
+            get => contents.Position;
+            set => throw new NotSupportedException();
+        }
+
+        public byte[] ToArray() => contents.ToArray();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            SynchronousWriteCount++;
+            contents.Write(buffer, offset, count);
+        }
+
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            AsynchronousWriteCount++;
+            return contents.WriteAsync(buffer, cancellationToken);
+        }
+
+        public override Task WriteAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            AsynchronousWriteCount++;
+            return contents.WriteAsync(buffer, offset, count, cancellationToken);
+        }
+
+        public override void Flush() => contents.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                contents.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class NeverCompletingStream : Stream
