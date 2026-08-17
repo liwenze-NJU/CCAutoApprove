@@ -43,10 +43,28 @@ public sealed class RuntimeStateValidatorTests
         Assert.False(validator.Validate(state).IsValid);
     }
 
+    // Catches mutations that allow process-inspection failures to escape instead of failing closed.
+    [Fact]
+    public void Validate_FailsClosedWhenProcessIdentityValidationThrows()
+    {
+        var state = RuntimeState.CreateForTest(true, Now);
+        var validator = new RuntimeStateValidator(new FakeClock(Now), new ThrowingProcessValidator());
+
+        RuntimeValidationResult result = validator.Validate(state);
+
+        Assert.False(result.IsValid);
+        Assert.Equal("ProcessValidationError", result.ErrorCode);
+    }
+
     private sealed record FakeClock(DateTimeOffset UtcNow) : IClock;
 
     private sealed record FakeProcessValidator(bool Result) : IProcessIdentityValidator
     {
         public bool IsValid(RuntimeState state) => Result;
+    }
+
+    private sealed class ThrowingProcessValidator : IProcessIdentityValidator
+    {
+        public bool IsValid(RuntimeState state) => throw new InvalidOperationException("Process inspection failed.");
     }
 }

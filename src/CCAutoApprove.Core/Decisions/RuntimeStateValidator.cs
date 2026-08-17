@@ -13,7 +13,18 @@ public sealed class RuntimeStateValidator(IClock clock, IProcessIdentityValidato
     {
         if (!state.Enabled) return RuntimeValidationResult.Invalid("Disabled");
         if (string.IsNullOrWhiteSpace(state.SelectedProject)) return RuntimeValidationResult.Invalid("MissingProject");
-        if (!processValidator.IsValid(state)) return RuntimeValidationResult.Invalid("InvalidProcess");
+
+        bool isProcessValid;
+        try
+        {
+            isProcessValid = processValidator.IsValid(state);
+        }
+        catch
+        {
+            return RuntimeValidationResult.Invalid("ProcessValidationError");
+        }
+
+        if (!isProcessValid) return RuntimeValidationResult.Invalid("InvalidProcess");
 
         TimeSpan age = clock.UtcNow - state.HeartbeatUtc;
         if (age < -FutureTolerance) return RuntimeValidationResult.Invalid("FutureHeartbeat");
