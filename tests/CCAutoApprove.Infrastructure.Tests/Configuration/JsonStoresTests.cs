@@ -30,6 +30,20 @@ public sealed class JsonStoresTests
         Assert.Null(await store.LoadAsync(CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("{\"schemaVersion\":1,\"enabled\":true,\"processId\":42,\"processStartUtc\":\"2026-08-17T00:00:00+00:00\",\"heartbeatUtc\":\"2026-08-17T00:01:00+00:00\",\"selectedProject\":\"D:\\\\work\"}")]
+    [InlineData("{\"schemaVersion\":2,\"enabled\":true,\"processId\":42,\"processStartUtc\":\"2026-08-17T00:00:00+00:00\",\"instanceId\":\"11111111-1111-1111-1111-111111111111\",\"heartbeatUtc\":\"2026-08-17T00:01:00+00:00\",\"selectedProject\":\"D:\\\\work\"}")]
+    [InlineData("{\"schemaVersion\":1,\"enabled\":true,\"processId\":42,\"processStartUtc\":\"2026-08-17T00:00:00+00:00\",\"instanceId\":\"11111111-1111-1111-1111-111111111111\",\"heartbeatUtc\":\"2026-08-17T00:01:00+00:00\",\"selectedProject\":null}")]
+    [InlineData("{\"schemaVersion\":1,\"enabled\":true,\"processId\":0,\"processStartUtc\":\"2026-08-17T00:00:00+00:00\",\"instanceId\":\"00000000-0000-0000-0000-000000000000\",\"heartbeatUtc\":\"2026-08-17T00:01:00+00:00\",\"selectedProject\":\"D:\\\\work\"}")]
+    public async Task RuntimeStore_StructurallyInvalidJson_ReturnsNull(string json)
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "runtime.json");
+        await File.WriteAllTextAsync(path, json);
+
+        Assert.Null(await new JsonRuntimeStateStore(path).LoadAsync(CancellationToken.None));
+    }
+
     [Fact]
     public async Task RuntimeStore_ConcurrentReadsAndWrites_OnlyReturnsCompleteSchemaVersionOneDocuments()
     {
@@ -100,6 +114,19 @@ public sealed class JsonStoresTests
         var store = new JsonSettingsStore(path);
 
         await Assert.ThrowsAsync<InvalidDataException>(() => store.LoadAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"schemaVersion\":2,\"selectedProject\":null,\"startWithWindows\":false,\"language\":\"zh-CN\",\"auditDetailLevel\":1,\"auditRetentionDays\":7}")]
+    [InlineData("{\"schemaVersion\":1,\"selectedProject\":null,\"startWithWindows\":false,\"language\":null,\"auditDetailLevel\":1,\"auditRetentionDays\":7}")]
+    public async Task SettingsStore_StructurallyInvalidJson_ThrowsInvalidDataException(string json)
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        await File.WriteAllTextAsync(path, json);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => new JsonSettingsStore(path).LoadAsync(CancellationToken.None));
     }
 
     [Fact]

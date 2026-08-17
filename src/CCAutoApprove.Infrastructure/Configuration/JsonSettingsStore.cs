@@ -21,8 +21,11 @@ public sealed class JsonSettingsStore : ISettingsStore
         try
         {
             string json = await File.ReadAllTextAsync(path, cancellationToken);
-            return JsonSerializer.Deserialize<PersistentSettings>(json, JsonDefaults.Options)
-                ?? throw new InvalidDataException("Settings JSON must contain an object.");
+            using JsonDocument document = JsonDocument.Parse(json);
+            PersistentSettings? settings = JsonSerializer.Deserialize<PersistentSettings>(json, JsonDefaults.Options);
+            return IsValid(document.RootElement, settings)
+                ? settings!
+                : throw new InvalidDataException("Settings JSON is structurally invalid.");
         }
         catch (FileNotFoundException)
         {
@@ -40,4 +43,16 @@ public sealed class JsonSettingsStore : ISettingsStore
 
     public Task SaveAsync(PersistentSettings settings, CancellationToken cancellationToken) =>
         writer.WriteAllTextAsync(path, JsonSerializer.Serialize(settings, JsonDefaults.Options), cancellationToken);
+
+    private static bool IsValid(JsonElement document, PersistentSettings? settings) =>
+        document.ValueKind == JsonValueKind.Object
+        && HasProperties(document, "schemaVersion", "selectedProject", "startWithWindows", "language", "auditDetailLevel", "auditRetentionDays")
+        && settings is not null
+        && settings.SchemaVersion == 1
+        && !string.IsNullOrWhiteSpace(settings.Language)
+        && Enum.IsDefined(settings.AuditDetailLevel);
+
+    private static bool HasProperties(JsonElement document, params string[] names) =>
+        names.All(name => document.EnumerateObject().Any(property =>
+            string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)));
 }
