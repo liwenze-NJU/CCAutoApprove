@@ -107,7 +107,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     }
 
     private static string GetStatusText(bool enabled, string? currentErrorCode) =>
-        currentErrorCode == AppController.HeartbeatWriteFailed
+        currentErrorCode is AppController.HeartbeatWriteFailed or AppController.SelectedProjectNotFound
             ? "异常"
             : enabled
                 ? "正在自动批准"

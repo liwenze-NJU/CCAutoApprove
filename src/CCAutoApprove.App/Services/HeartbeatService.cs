@@ -8,6 +8,7 @@ public sealed class HeartbeatService : IAsyncDisposable
     private readonly IRuntimeStateStore runtimeStateStore;
     private readonly IClock clock;
     private readonly ICurrentProcessInfo processInfo;
+    private readonly IDirectoryService directoryService;
     private readonly IHeartbeatTimer timer;
     private readonly SemaphoreSlim writeGate = new(1, 1);
     private readonly object stateLock = new();
@@ -24,15 +25,17 @@ public sealed class HeartbeatService : IAsyncDisposable
         IRuntimeStateStore runtimeStateStore,
         IClock clock,
         ICurrentProcessInfo processInfo,
+        IDirectoryService directoryService,
         IHeartbeatTimer timer)
     {
         this.runtimeStateStore = runtimeStateStore ?? throw new ArgumentNullException(nameof(runtimeStateStore));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
         this.processInfo = processInfo ?? throw new ArgumentNullException(nameof(processInfo));
+        this.directoryService = directoryService ?? throw new ArgumentNullException(nameof(directoryService));
         this.timer = timer ?? throw new ArgumentNullException(nameof(timer));
     }
 
-    public event EventHandler? Faulted;
+    public event EventHandler<HeartbeatFaultedEventArgs>? Faulted;
 
     public Guid InstanceId
     {
@@ -216,10 +219,10 @@ public sealed class HeartbeatService : IAsyncDisposable
                     return;
                 }
 
-                bool faulted = await TryWriteHeartbeatAsync(cancellationToken).ConfigureAwait(false);
-                if (faulted)
+                HeartbeatFaultKind? fault = await TryWriteHeartbeatAsync(cancellationToken).ConfigureAwait(false);
+                if (fault is HeartbeatFaultKind faultKind)
                 {
-                    Faulted?.Invoke(this, EventArgs.Empty);
+                    Faulted?.Invoke(this, new HeartbeatFaultedEventArgs(faultKind));
                     return;
                 }
             }
@@ -229,7 +232,7 @@ public sealed class HeartbeatService : IAsyncDisposable
         }
     }
 
-    private async Task<bool> TryWriteHeartbeatAsync(CancellationToken cancellationToken)
+    private async Task<HeartbeatFaultKind?> TryWriteHeartbeatAsync(CancellationToken cancellationToken)
     {
         await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -240,17 +243,27 @@ public sealed class HeartbeatService : IAsyncDisposable
             {
                 if (!isEnabled)
                 {
-                    return false;
+                    return null;
                 }
                 project = selectedProject;
                 currentInstanceId = instanceId;
+            }
+
+            if (!directoryService.Exists(project))
+            {
+                lock (stateLock)
+                {
+                    isEnabled = false;
+                }
+                await TryWriteFinalDisabledStateAsync(project, currentInstanceId).ConfigureAwait(false);
+                return HeartbeatFaultKind.SelectedProjectUnavailable;
             }
 
             RuntimeState enabledState = CreateState(enabled: true, project, currentInstanceId);
             try
             {
                 await runtimeStateStore.SaveAsync(enabledState, cancellationToken).ConfigureAwait(false);
-                return false;
+                return null;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -261,7 +274,7 @@ public sealed class HeartbeatService : IAsyncDisposable
                 try
                 {
                     await runtimeStateStore.SaveAsync(enabledState, cancellationToken).ConfigureAwait(false);
-                    return false;
+                    return null;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -274,22 +287,27 @@ public sealed class HeartbeatService : IAsyncDisposable
                         isEnabled = false;
                     }
 
-                    try
-                    {
-                        await runtimeStateStore.SaveAsync(
-                            CreateState(enabled: false, project, currentInstanceId), CancellationToken.None)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                    }
-                    return true;
+                    await TryWriteFinalDisabledStateAsync(project, currentInstanceId).ConfigureAwait(false);
+                    return HeartbeatFaultKind.WriteFailed;
                 }
             }
         }
         finally
         {
             writeGate.Release();
+        }
+    }
+
+    private async Task TryWriteFinalDisabledStateAsync(string project, Guid currentInstanceId)
+    {
+        try
+        {
+            await runtimeStateStore.SaveAsync(
+                CreateState(enabled: false, project, currentInstanceId), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
         }
     }
 
@@ -314,4 +332,15 @@ public sealed class HeartbeatService : IAsyncDisposable
             }
         }
     }
+}
+
+public enum HeartbeatFaultKind
+{
+    WriteFailed,
+    SelectedProjectUnavailable
+}
+
+public sealed class HeartbeatFaultedEventArgs(HeartbeatFaultKind kind) : EventArgs
+{
+    public HeartbeatFaultKind Kind { get; } = kind;
 }

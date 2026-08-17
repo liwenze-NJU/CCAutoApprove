@@ -79,6 +79,22 @@ public sealed class AppControllerTests
     }
 
     [Fact]
+    public async Task EnableAsync_WhenAlreadyEnabledAndNewSelectionIsInvalid_PreservesActiveState()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+
+        bool enabled = await environment.Controller.EnableAsync(null, CancellationToken.None);
+
+        Assert.False(enabled);
+        Assert.True(environment.Controller.IsEnabled);
+        Assert.True(environment.Heartbeat.IsEnabled);
+        Assert.True(environment.Heartbeat.IsRunning);
+        Assert.True(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
+    }
+
+    [Fact]
     public async Task PauseAsync_WhenEnabled_WritesDisabledAndStopsHeartbeat()
     {
         await using var environment = CreateEnvironment();
@@ -147,6 +163,52 @@ public sealed class AppControllerTests
     }
 
     [Fact]
+    public async Task HeartbeatFault_WhenFaultHandlerReenables_WaitsForOldLoopBeforeStartingSuccessor()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        environment.RuntimeStore.FailNextWrites = 2;
+        Task<bool>? reenableTask = null;
+        var reenableDispatched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        environment.Heartbeat.Faulted += (_, _) =>
+        {
+            reenableTask = environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+            reenableDispatched.TrySetResult();
+        };
+
+        await environment.Timer.TickAsync();
+        await reenableDispatched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.NotNull(reenableTask);
+        Assert.True(await reenableTask);
+
+        Assert.True(environment.Controller.IsEnabled);
+        Assert.True(environment.Heartbeat.IsEnabled);
+        Assert.True(environment.Heartbeat.IsRunning);
+        Assert.True(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
+        Assert.Null(environment.Controller.ErrorCode);
+    }
+
+    [Fact]
+    public async Task HeartbeatTick_WhenSelectedDirectoryDisappears_DisablesAndStops()
+    {
+        await using var environment = CreateEnvironment();
+        await environment.Controller.InitializeAsync(CancellationToken.None);
+        await environment.Controller.EnableAsync(ExistingProject, CancellationToken.None);
+        environment.Directory.ExistsResult = false;
+
+        await environment.Timer.TickAsync();
+        await environment.RuntimeStore.WaitForSuccessfulSaveCountAsync(3);
+        await environment.Heartbeat.StopAsync();
+
+        Assert.False(environment.Controller.IsEnabled);
+        Assert.False(environment.Heartbeat.IsEnabled);
+        Assert.False(environment.Heartbeat.IsRunning);
+        Assert.False(environment.RuntimeStore.SuccessfulStates[^1].Enabled);
+        Assert.Equal(AppController.SelectedProjectNotFound, environment.Controller.ErrorCode);
+    }
+
+    [Fact]
     public async Task ShutdownAsync_CancelsLoopAndWritesDisabledBeforeReturning()
     {
         await using var environment = CreateEnvironment();
@@ -205,14 +267,15 @@ public sealed class AppControllerTests
         var settingsStore = new FakeSettingsStore(new PersistentSettings(SelectedProject: selectedProject),
             () => order?.Add("settings"));
         var timer = new OrderedFakeHeartbeatTimer(() => order?.Add("timer"));
+        var directory = new FakeDirectoryService(directoryExists, () => order?.Add("directory"));
         var heartbeat = new HeartbeatService(runtimeStore,
             new FakeClock(new DateTimeOffset(2026, 8, 17, 2, 0, 0, TimeSpan.Zero)),
-            new FakeCurrentProcessInfo(7123, ProcessStartUtc), timer);
+            new FakeCurrentProcessInfo(7123, ProcessStartUtc), directory, timer);
         var controller = new AppController(settingsStore,
-            new FakeDirectoryService(directoryExists, () => order?.Add("directory")),
+            directory,
             new FakeHookHealthService(hookOperational, () => order?.Add("health")),
             heartbeat);
-        return new TestEnvironment(controller, heartbeat, runtimeStore, settingsStore, timer);
+        return new TestEnvironment(controller, heartbeat, runtimeStore, settingsStore, timer, directory);
     }
 
     private sealed record TestEnvironment(
@@ -220,7 +283,8 @@ public sealed class AppControllerTests
         HeartbeatService Heartbeat,
         RecordingRuntimeStateStore RuntimeStore,
         FakeSettingsStore SettingsStore,
-        OrderedFakeHeartbeatTimer Timer) : IAsyncDisposable
+        OrderedFakeHeartbeatTimer Timer,
+        FakeDirectoryService Directory) : IAsyncDisposable
     {
         public ValueTask DisposeAsync() => Heartbeat.DisposeAsync();
     }
@@ -256,10 +320,12 @@ public sealed class AppControllerTests
 
     private sealed class FakeDirectoryService(bool exists, Action onExists) : IDirectoryService
     {
+        public bool ExistsResult { get; set; } = exists;
+
         public bool Exists(string path)
         {
             onExists();
-            return exists;
+            return ExistsResult;
         }
     }
 

@@ -89,7 +89,7 @@ public sealed class HeartbeatServiceTests
         IHeartbeatTimer timer,
         FakeClock? clock = null) =>
         new(store, clock ?? new FakeClock(new DateTimeOffset(2026, 8, 17, 2, 0, 0, TimeSpan.Zero)),
-            new FakeCurrentProcessInfo(4242, ProcessStartUtc), timer);
+            new FakeCurrentProcessInfo(4242, ProcessStartUtc), new AlwaysExistingDirectoryService(), timer);
 }
 
 internal sealed class FakeHeartbeatTimer : IHeartbeatTimer
@@ -249,4 +249,9 @@ internal sealed class FakeCurrentProcessInfo(int processId, DateTimeOffset proce
 {
     public int ProcessId { get; } = processId;
     public DateTimeOffset ProcessStartUtc { get; } = processStartUtc;
+}
+
+internal sealed class AlwaysExistingDirectoryService : IDirectoryService
+{
+    public bool Exists(string path) => true;
 }

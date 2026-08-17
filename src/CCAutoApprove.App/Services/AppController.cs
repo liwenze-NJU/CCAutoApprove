@@ -129,6 +129,7 @@ public sealed class AppController
             PersistentSettings updatedSettings = settings with { SelectedProject = project };
             await settingsStore.SaveAsync(updatedSettings, cancellationToken).ConfigureAwait(false);
             settings = updatedSettings;
+            await heartbeatService.StopAsync().ConfigureAwait(false);
             await heartbeatService.EnableAsync(project, cancellationToken).ConfigureAwait(false);
             lock (stateLock)
             {
@@ -225,12 +226,14 @@ public sealed class AppController
         }
     }
 
-    private void OnHeartbeatFaulted(object? sender, EventArgs eventArgs)
+    private void OnHeartbeatFaulted(object? sender, HeartbeatFaultedEventArgs eventArgs)
     {
         lock (stateLock)
         {
             isEnabled = false;
-            errorCode = HeartbeatWriteFailed;
+            errorCode = eventArgs.Kind == HeartbeatFaultKind.SelectedProjectUnavailable
+                ? SelectedProjectNotFound
+                : HeartbeatWriteFailed;
         }
         OnStateChanged();
     }
@@ -239,7 +242,6 @@ public sealed class AppController
     {
         lock (stateLock)
         {
-            isEnabled = false;
             errorCode = value;
         }
     }

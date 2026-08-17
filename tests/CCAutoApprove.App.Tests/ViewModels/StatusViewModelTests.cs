@@ -93,7 +93,8 @@ public sealed class StatusViewModelTests
             var heartbeat = new HeartbeatService(runtimeStore,
                 new FakeClock(new DateTimeOffset(2026, 8, 17, 3, 0, 0, TimeSpan.Zero)),
                 new FakeCurrentProcessInfo(8112,
-                    new DateTimeOffset(2026, 8, 17, 2, 59, 0, TimeSpan.Zero)), timer);
+                    new DateTimeOffset(2026, 8, 17, 2, 59, 0, TimeSpan.Zero)),
+                new ExistingDirectoryService(), timer);
             var controller = new AppController(new StatusSettingsStore(),
                 new ExistingDirectoryService(), new OperationalHookHealthService(), heartbeat);
             await controller.InitializeAsync(CancellationToken.None);
