@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.IO;
 using System.Windows;
 using CCAutoApprove.App.Services;
@@ -143,20 +142,28 @@ public partial class App : System.Windows.Application
 
     private static string ResolveCliPath()
     {
-        string? configured = Environment.GetEnvironmentVariable("CCAA_CLI_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
+        return ResolveCliPath(
+            AppContext.BaseDirectory,
+            Environment.GetEnvironmentVariable("CCAA_CLI_PATH"));
+    }
+
+    internal static string ResolveCliPath(string appBaseDirectory, string? configuredPath)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath))
         {
-            return configured;
+            return configuredPath;
         }
 
-        string appDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? AppContext.BaseDirectory;
-        return Path.Combine(appDirectory, "CCAutoApprove.Cli.exe");
+        string fullAppDirectory = Path.GetFullPath(appBaseDirectory);
+        string installRoot = Directory.GetParent(
+            Path.TrimEndingDirectorySeparator(fullAppDirectory))?.FullName
+            ?? throw new InvalidOperationException("The application directory has no parent.");
+        return Path.Combine(installRoot, "cli", "CCAutoApprove.Cli.exe");
     }
 
     private static string ResolveAppExecutablePath() =>
         Environment.ProcessPath
-        ?? Assembly.GetEntryAssembly()?.Location
-        ?? Assembly.GetExecutingAssembly().Location;
+        ?? Path.Combine(AppContext.BaseDirectory, "CCAutoApprove.App.exe");
 
     internal static bool ShouldShowMainWindow(IEnumerable<string> arguments) =>
         !arguments.Any(argument => string.Equals(argument, "--minimized", StringComparison.OrdinalIgnoreCase));

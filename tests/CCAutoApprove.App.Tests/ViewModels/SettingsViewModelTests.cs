@@ -19,6 +19,21 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void ResolveCliPath_UsesPublishedSiblingDirectoryUnlessExplicitlyConfigured()
+    {
+        string appDirectory = Path.Combine("C:\\Program Files", "CCAutoApprove", "app");
+        string configuredPath = Path.Combine("D:\\tools", "custom-cli.exe");
+
+        string defaultPath = App.ResolveCliPath(appDirectory, configuredPath: null);
+        string overriddenPath = App.ResolveCliPath(appDirectory, configuredPath);
+
+        Assert.Equal(
+            Path.Combine("C:\\Program Files", "CCAutoApprove", "cli", "CCAutoApprove.Cli.exe"),
+            defaultPath);
+        Assert.Equal(configuredPath, overriddenPath);
+    }
+
+    [Fact]
     public async Task ChangeAuditDetailLevelAsync_FromDetailedToPrivacySafe_DeletesWhenUserChoosesDelete()
     {
         var settingsStore = new FakeSettingsStore(new PersistentSettings(AuditDetailLevel: AuditDetailLevel.Detailed));

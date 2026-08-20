@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Decisions;
@@ -220,16 +219,6 @@ public sealed class CliApplication(
 
     private static string ResolveCliPath()
     {
-        string assemblyPath = Assembly.GetExecutingAssembly().Location;
-        if (!string.IsNullOrWhiteSpace(assemblyPath))
-        {
-            string appHostPath = Path.ChangeExtension(assemblyPath, ".exe");
-            if (File.Exists(appHostPath))
-            {
-                return appHostPath;
-            }
-        }
-
         return Environment.ProcessPath
             ?? throw new InvalidOperationException("The CLI executable path is unavailable.");
     }
