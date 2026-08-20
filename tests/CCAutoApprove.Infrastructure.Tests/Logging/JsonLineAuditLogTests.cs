@@ -152,6 +152,60 @@ public sealed class JsonLineAuditLogTests
     }
 
     [Fact]
+    public async Task CountAllowedAsync_UtcWindow_ReadsOnlyOverlappingFilesAndSkipsMalformedLines()
+    {
+        using var temp = new TemporaryDirectory();
+        string logs = Path.Combine(temp.Path, "logs");
+        Directory.CreateDirectory(logs);
+        string older = Path.Combine(logs, "audit-2026-08-18.jsonl");
+        await File.WriteAllTextAsync(older, CreateCountLine("2026-08-18T20:00:00+00:00", 1, 0));
+        await File.WriteAllLinesAsync(Path.Combine(logs, "audit-2026-08-19.jsonl"),
+        [
+            CreateCountLine("2026-08-19T15:59:59+00:00", 2, 0),
+            CreateCountLine("2026-08-19T16:00:00+00:00", 3, 0),
+            "{malformed"
+        ]);
+        await File.WriteAllLinesAsync(Path.Combine(logs, "audit-2026-08-20.jsonl"),
+        [
+            CreateCountLine("2026-08-20T15:59:59+00:00", 4, 0),
+            CreateCountLine("2026-08-20T12:00:00+00:00", 5, 1),
+            CreateCountLine("2026-08-20T16:00:00+00:00", 6, 0),
+            "not-json"
+        ]);
+        await using var lockedOlderFile = new FileStream(
+            older,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None);
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+
+        int count = await log.CountAllowedAsync(
+            new DateTimeOffset(2026, 8, 19, 16, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 8, 20, 16, 0, 0, TimeSpan.Zero),
+            CancellationToken.None);
+
+        Assert.Equal(2, count);
+    }
+
+    [Fact]
+    public async Task CountAllowedAsync_WhenCanceledWhileWaitingForMutex_StopsWaiting()
+    {
+        using var temp = new TemporaryDirectory();
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+        await using var heldMutex = new HeldAuditMutex();
+        using var cancellation = new CancellationTokenSource();
+
+        Task<int> count = log.CountAllowedAsync(
+            new DateTimeOffset(2026, 8, 19, 16, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2026, 8, 20, 16, 0, 0, TimeSpan.Zero),
+            cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            count.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
     public async Task ClearAsync_RemovesAuditFilesAndLeavesOtherLogFiles()
     {
         using var temp = new TemporaryDirectory();
@@ -370,6 +424,9 @@ public sealed class JsonLineAuditLogTests
                 .ToArray()
             : [];
     }
+
+    private static string CreateCountLine(string timeUtc, int idSuffix, int decision) =>
+        $$"""{"timeUtc":"{{timeUtc}}","requestId":"00000000-0000-0000-0000-{{idSuffix.ToString("000000000000")}}","project":"D:\\projects\\safe-app","tool":"Bash","decision":{{decision}},"source":0}""";
 
     private sealed class StubClock(DateTimeOffset utcNow) : IClock
     {

@@ -99,6 +99,11 @@ public sealed class SettingsViewModelTests
         public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(int maximumCount, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<AuditRecord>>([]);
 
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
+
         public Task ClearAsync(CancellationToken cancellationToken)
         {
             ClearCalled = true;

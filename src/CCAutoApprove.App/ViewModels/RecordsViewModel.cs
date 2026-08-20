@@ -102,14 +102,19 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
         SelectedRecord = Records.FirstOrDefault();
     }
 
-    public async Task<int> CountTodayApprovalsAsync(DateOnly localDate)
+    public Task<int> CountTodayApprovalsAsync(
+        DateOnly localDate,
+        TimeZoneInfo timeZone,
+        CancellationToken cancellationToken)
     {
-        IReadOnlyList<AuditRecord> allRecords = await auditLog.ReadRecentAsync(
-            int.MaxValue,
-            CancellationToken.None);
-        return allRecords.Count(record =>
-            record.Decision == ApprovalDecisionKind.Allow
-            && DateOnly.FromDateTime(record.TimeUtc.ToLocalTime().DateTime) == localDate);
+        ArgumentNullException.ThrowIfNull(timeZone);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        DateTime localStart = localDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        DateTime localEnd = localDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        DateTimeOffset startUtc = new(TimeZoneInfo.ConvertTimeToUtc(localStart, timeZone), TimeSpan.Zero);
+        DateTimeOffset endUtc = new(TimeZoneInfo.ConvertTimeToUtc(localEnd, timeZone), TimeSpan.Zero);
+        return auditLog.CountAllowedAsync(startUtc, endUtc, cancellationToken);
     }
 
     private async Task ClearAsync()
@@ -151,6 +156,11 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
         public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(int maximumCount, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<AuditRecord>>([]);
+
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
 
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;

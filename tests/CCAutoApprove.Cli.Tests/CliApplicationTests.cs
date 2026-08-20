@@ -374,6 +374,11 @@ public sealed class CliApplicationTests : IDisposable
             CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<AuditRecord>>([]);
 
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
+
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -411,6 +416,11 @@ public sealed class CliApplicationTests : IDisposable
             int maximumCount,
             CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<AuditRecord>>([]);
+
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
 
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 

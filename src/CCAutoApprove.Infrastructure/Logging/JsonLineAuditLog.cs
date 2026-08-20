@@ -80,6 +80,31 @@ public sealed class JsonLineAuditLog : IAuditLog
         }, CancellationToken.None);
     }
 
+    public Task<int> CountAllowedAsync(
+        DateTimeOffset startUtcInclusive,
+        DateTimeOffset endUtcExclusive,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DateTimeOffset startUtc = startUtcInclusive.ToUniversalTime();
+        DateTimeOffset endUtc = endUtcExclusive.ToUniversalTime();
+        if (endUtc <= startUtc)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(endUtcExclusive),
+                "The end of the audit interval must be later than its start.");
+        }
+
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int count = 0;
+            WithMutex(cancellationToken, () =>
+                count = CountAllowedRecords(startUtc, endUtc, cancellationToken));
+            return count;
+        }, cancellationToken);
+    }
+
     public Task ClearAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -170,6 +195,54 @@ public sealed class JsonLineAuditLog : IAuditLog
                 }
             }
         }
+    }
+
+    private int CountAllowedRecords(
+        DateTimeOffset startUtcInclusive,
+        DateTimeOffset endUtcExclusive,
+        CancellationToken cancellationToken)
+    {
+        int count = 0;
+        DateOnly firstDate = DateOnly.FromDateTime(startUtcInclusive.UtcDateTime);
+        DateOnly lastDate = DateOnly.FromDateTime(endUtcExclusive.AddTicks(-1).UtcDateTime);
+
+        for (DateOnly date = firstDate; date <= lastDate; date = date.AddDays(1))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string filePath = Path.Combine(logsDirectory, $"audit-{date:yyyy-MM-dd}.jsonl");
+            if (!File.Exists(filePath))
+            {
+                continue;
+            }
+
+            using var stream = new FileStream(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            while (reader.ReadLine() is { } line)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    AuditRecord? record = JsonSerializer.Deserialize<AuditRecord>(line, LogJsonOptions);
+                    if (record is not null
+                        && record.Decision == ApprovalDecisionKind.Allow
+                        && record.TimeUtc >= startUtcInclusive
+                        && record.TimeUtc < endUtcExclusive)
+                    {
+                        count++;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // A damaged record must not hide other readable records from the count.
+                }
+            }
+        }
+
+        return count;
     }
 
     private static async Task RunWithoutAffectingDecisionAsync(Action action, CancellationToken cancellationToken)

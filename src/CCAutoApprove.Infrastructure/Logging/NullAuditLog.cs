@@ -14,6 +14,15 @@ public sealed class NullAuditLog : IAuditLog
         int maximumCount,
         CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<AuditRecord>>([]);
 
+    public Task<int> CountAllowedAsync(
+        DateTimeOffset startUtcInclusive,
+        DateTimeOffset endUtcExclusive,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(0);
+    }
+
     public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;

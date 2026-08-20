@@ -171,6 +171,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Task.CompletedTask;
         public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(int maximumCount, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<AuditRecord>>([]);
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
     }

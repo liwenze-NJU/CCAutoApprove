@@ -96,23 +96,25 @@ public sealed class RecordsViewModelTests
     }
 
     [Fact]
-    public async Task CountTodayApprovalsAsync_MoreThanDisplayLimit_CountsAllTodayApprovals()
+    public async Task CountTodayApprovalsAsync_UsesNarrowUtcRangeWithoutReadingRecentHistory()
     {
         var today = new DateOnly(2026, 8, 20);
-        AuditRecord[] records = Enumerable.Range(0, 250)
-            .Select(index => CreateCountRecord(today, index, ApprovalDecisionKind.Allow))
-            .Concat(Enumerable.Range(250, 10)
-                .Select(index => CreateCountRecord(today, index, ApprovalDecisionKind.Deny)))
-            .Concat(Enumerable.Range(260, 5)
-                .Select(index => CreateCountRecord(today.AddDays(-1), index, ApprovalDecisionKind.Allow)))
-            .ToArray();
-        var auditLog = new FakeAuditLog(records);
+        TimeZoneInfo timeZone = TimeZoneInfo.CreateCustomTimeZone(
+            "RecordsViewModelTests.UTC+08",
+            TimeSpan.FromHours(8),
+            "UTC+08",
+            "UTC+08");
+        var auditLog = new FakeAuditLog([]) { CountAllowedResult = 250 };
         var viewModel = new RecordsViewModel(auditLog, () => Task.FromResult(false));
+        using var cancellation = new CancellationTokenSource();
 
-        int count = await viewModel.CountTodayApprovalsAsync(today);
+        int count = await viewModel.CountTodayApprovalsAsync(today, timeZone, cancellation.Token);
 
         Assert.Equal(250, count);
-        Assert.Equal(int.MaxValue, auditLog.LastMaximumCount);
+        Assert.False(auditLog.ReadRecentCalled);
+        Assert.Equal(new DateTimeOffset(2026, 8, 19, 16, 0, 0, TimeSpan.Zero), auditLog.LastCountStartUtc);
+        Assert.Equal(new DateTimeOffset(2026, 8, 20, 16, 0, 0, TimeSpan.Zero), auditLog.LastCountEndUtc);
+        Assert.Equal(cancellation.Token, auditLog.LastCountCancellationToken);
     }
 
     [Theory]
@@ -192,18 +194,35 @@ public sealed class RecordsViewModelTests
 
         public int LastMaximumCount { get; private set; }
         public bool ClearCalled { get; private set; }
+        public bool ReadRecentCalled { get; private set; }
+        public int CountAllowedResult { get; init; }
+        public DateTimeOffset? LastCountStartUtc { get; private set; }
+        public DateTimeOffset? LastCountEndUtc { get; private set; }
+        public CancellationToken LastCountCancellationToken { get; private set; }
 
         public Task WriteAsync(ApprovalRequest request, ApprovalDecision decision, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
         public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(int maximumCount, CancellationToken cancellationToken)
         {
+            ReadRecentCalled = true;
             LastMaximumCount = maximumCount;
             IReadOnlyList<AuditRecord> result = records
                 .OrderByDescending(record => record.TimeUtc)
                 .Take(maximumCount)
                 .ToArray();
             return Task.FromResult(result);
+        }
+
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken)
+        {
+            LastCountStartUtc = startUtcInclusive;
+            LastCountEndUtc = endUtcExclusive;
+            LastCountCancellationToken = cancellationToken;
+            return Task.FromResult(CountAllowedResult);
         }
 
         public Task ClearAsync(CancellationToken cancellationToken)
