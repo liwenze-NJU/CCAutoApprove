@@ -50,8 +50,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         DoctorCommand = CreateOperationCommand(this.runDoctorAsync);
         UninstallHookCommand = CreateOperationCommand(this.uninstallHookAsync);
         ChangeStartupEnabledCommand = new AsyncRelayCommand(
-            parameter => ChangeStartupEnabledAsync(parameter is true),
-            HandleStartupErrorAsync);
+            parameter => parameter is bool enabled
+                ? ChangeStartupEnabledAsync(enabled)
+                : Task.CompletedTask,
+            HandleStartupErrorAsync,
+            () => CanChangeStartup);
+        RecheckStartupCommand = new AsyncRelayCommand(
+            RecheckStartupAsync,
+            HandleStartupErrorAsync,
+            () => CanRecheckStartup);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -80,10 +87,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public bool? StartupEnabled
     {
         get => startupEnabled;
-        private set => SetProperty(ref startupEnabled, value);
+        private set => SetStartupState(value);
     }
 
-    public bool CanChangeStartup => true;
+    public bool CanChangeStartup => StartupEnabled.HasValue;
+    public bool CanRecheckStartup => !StartupEnabled.HasValue;
 
     public string? OperationMessage
     {
@@ -98,12 +106,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public AsyncRelayCommand DoctorCommand { get; }
     public AsyncRelayCommand UninstallHookCommand { get; }
     public AsyncRelayCommand ChangeStartupEnabledCommand { get; }
+    public AsyncRelayCommand RecheckStartupCommand { get; }
 
     public async Task LoadAsync()
     {
         settings = await settingsStore.LoadAsync(CancellationToken.None);
         AuditDetailLevel = settings.AuditDetailLevel;
-        StartupEnabled = ReadStartupState();
+        SetStartupState(ReadStartupState(), forceNotification: true);
         if (StartupEnabled is null)
         {
             OperationMessage = StringResources.Get("StartupStateUnknown");
@@ -134,7 +143,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public async Task ChangeStartupEnabledAsync(bool enabled)
     {
         bool? priorEnabled = StartupEnabled;
-        if (priorEnabled.HasValue && enabled == priorEnabled.Value)
+        if (!priorEnabled.HasValue)
+        {
+            OperationMessage = StringResources.Get("StartupStateUnknown");
+            return;
+        }
+
+        if (enabled == priorEnabled.Value)
         {
             return;
         }
@@ -159,8 +174,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch
         {
             RestoreStartupState(priorEnabled);
-            StartupEnabled = ReadStartupState();
-            OnPropertyChanged(nameof(StartupEnabled));
+            SetStartupState(ReadStartupState(), forceNotification: true);
             OperationMessage = StartupEnabled is null
                 ? StringResources.Get("StartupStateUnknown")
                 : StringResources.Get("ErrorOperationFailed");
@@ -169,12 +183,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     private async Task HandleStartupErrorAsync(Exception exception)
     {
-        StartupEnabled = ReadStartupState();
-        OnPropertyChanged(nameof(StartupEnabled));
+        SetStartupState(ReadStartupState(), forceNotification: true);
         OperationMessage = StartupEnabled is null
             ? StringResources.Get("StartupStateUnknown")
             : StringResources.Get("ErrorOperationFailed");
         await Task.CompletedTask;
+    }
+
+    private Task RecheckStartupAsync()
+    {
+        SetStartupState(ReadStartupState(), forceNotification: true);
+        OperationMessage = StartupEnabled is null
+            ? StringResources.Get("StartupStateUnknown")
+            : null;
+        return Task.CompletedTask;
     }
 
     private void RestoreStartupState(bool? priorEnabled)
@@ -214,6 +236,28 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch
         {
             return null;
+        }
+    }
+
+    private void SetStartupState(bool? value, bool forceNotification = false)
+    {
+        bool changed = !EqualityComparer<bool?>.Default.Equals(startupEnabled, value);
+        if (changed)
+        {
+            startupEnabled = value;
+            OnPropertyChanged(nameof(StartupEnabled));
+        }
+        else if (forceNotification)
+        {
+            OnPropertyChanged(nameof(StartupEnabled));
+        }
+
+        if (changed || forceNotification)
+        {
+            OnPropertyChanged(nameof(CanChangeStartup));
+            OnPropertyChanged(nameof(CanRecheckStartup));
+            ChangeStartupEnabledCommand.RaiseCanExecuteChanged();
+            RecheckStartupCommand.RaiseCanExecuteChanged();
         }
     }
 

@@ -190,9 +190,18 @@ public sealed class SettingsViewModelTests
         await viewModel.ChangeStartupEnabledAsync(true);
 
         Assert.Null(viewModel.StartupEnabled);
+        Assert.False(viewModel.CanChangeStartup);
+        Assert.True(viewModel.CanRecheckStartup);
         Assert.False(settingsStore.Settings.StartWithWindows);
         Assert.Equal(["enable", "disable"], startupManager.Operations);
         Assert.Equal(StringResources.Get("StartupStateUnknown"), viewModel.OperationMessage);
+
+        await viewModel.RecheckStartupCommand.ExecuteAsync();
+
+        Assert.True(viewModel.StartupEnabled);
+        Assert.True(viewModel.CanChangeStartup);
+        Assert.False(viewModel.CanRecheckStartup);
+        Assert.Null(viewModel.OperationMessage);
     }
 
     [Fact]
@@ -218,9 +227,18 @@ public sealed class SettingsViewModelTests
         await viewModel.ChangeStartupEnabledAsync(false);
 
         Assert.Null(viewModel.StartupEnabled);
+        Assert.False(viewModel.CanChangeStartup);
+        Assert.True(viewModel.CanRecheckStartup);
         Assert.True(settingsStore.Settings.StartWithWindows);
         Assert.Equal(["disable", "enable"], startupManager.Operations);
         Assert.Equal(StringResources.Get("StartupStateUnknown"), viewModel.OperationMessage);
+
+        await viewModel.RecheckStartupCommand.ExecuteAsync();
+
+        Assert.False(viewModel.StartupEnabled);
+        Assert.True(viewModel.CanChangeStartup);
+        Assert.False(viewModel.CanRecheckStartup);
+        Assert.Null(viewModel.OperationMessage);
     }
 
     [Fact]
@@ -235,12 +253,53 @@ public sealed class SettingsViewModelTests
             startupManager: startupManager);
 
         await viewModel.LoadAsync();
+        await viewModel.RecheckStartupCommand.ExecuteAsync();
         await viewModel.ChangeStartupEnabledAsync(true);
 
-        Assert.True(viewModel.CanChangeStartup);
+        Assert.False(viewModel.CanRecheckStartup);
         Assert.True(viewModel.StartupEnabled);
         Assert.True(settingsStore.Settings.StartWithWindows);
         Assert.Equal(["enable"], startupManager.Operations);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledCommand_WhenParameterIsNull_DoesNotMutateRegistry()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings());
+        var startupManager = new FakeStartupManager();
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledCommand.ExecuteAsync(null);
+
+        Assert.Empty(startupManager.Operations);
+        Assert.False(viewModel.StartupEnabled);
+        Assert.False(settingsStore.Settings.StartWithWindows);
+    }
+
+    [Fact]
+    public async Task RecheckStartupCommand_WhenRegistryReadFails_RemainsUnknownWithoutMutation()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings());
+        var startupManager = new FakeStartupManager { FailAllIsEnabledReads = true };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.RecheckStartupCommand.ExecuteAsync();
+
+        Assert.Null(viewModel.StartupEnabled);
+        Assert.False(viewModel.CanChangeStartup);
+        Assert.True(viewModel.CanRecheckStartup);
+        Assert.Equal(StringResources.Get("StartupStateUnknown"), viewModel.OperationMessage);
+        Assert.Empty(startupManager.Operations);
     }
 
     [Fact]
@@ -320,12 +379,13 @@ public sealed class SettingsViewModelTests
         public Exception? EnableException { get; init; }
         public Exception? DisableException { get; init; }
         public int? ThrowOnIsEnabledCall { get; init; }
+        public bool FailAllIsEnabledReads { get; init; }
         public bool Enabled { get; set; }
         private int isEnabledCalls;
 
         public bool IsEnabled()
         {
-            if (Interlocked.Increment(ref isEnabledCalls) == ThrowOnIsEnabledCall)
+            if (FailAllIsEnabledReads || Interlocked.Increment(ref isEnabledCalls) == ThrowOnIsEnabledCall)
             {
                 throw new IOException("registry read failed");
             }

@@ -55,6 +55,7 @@
     <sys:String x:Key="DeleteDetailedLogsPrompt">离开详细模式时，是否删除现有详细日志？</sys:String>
     <sys:String x:Key="StartupLabel">随 Windows 启动</sys:String>
     <sys:String x:Key="StartupStateUnknown">启动状态未知，请在权限恢复后重试。</sys:String>
+    <sys:String x:Key="StartupRecheck">重新检测</sys:String>
     <sys:String x:Key="HookActionsTitle">Claude Hook</sys:String>
     <sys:String x:Key="InstallHook">安装 Hook</sys:String>
     <sys:String x:Key="RunDoctor">运行检查</sys:String>
