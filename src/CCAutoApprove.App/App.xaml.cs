@@ -6,7 +6,6 @@ using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
 using CCAutoApprove.Infrastructure.Claude;
 using CCAutoApprove.Infrastructure.Configuration;
-using CCAutoApprove.Infrastructure.Logging;
 using CCAutoApprove.Infrastructure.Windows;
 using MessageBox = System.Windows.MessageBox;
 
@@ -60,9 +59,11 @@ public partial class App : System.Windows.Application
             var controller = new AppController(settingsStore, directoryService, doctor, heartbeatService);
             await controller.InitializeAsync(CancellationToken.None);
 
-            IAuditLog auditLog = settings.AuditDetailLevel == AuditDetailLevel.Disabled
-                ? new NullAuditLog()
-                : new JsonLineAuditLog(paths, settings, clock);
+            IAuditLog auditLog = AppAuditMaintenance.CreateLog(paths, settings, clock);
+            await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
+                auditLog,
+                settings.AuditRetentionDays,
+                CancellationToken.None);
             var status = new StatusViewModel(controller);
             var records = new RecordsViewModel(auditLog, ConfirmClearRecordsAsync, settings.AuditDetailLevel);
             var settingsViewModel = new SettingsViewModel(

@@ -45,7 +45,9 @@ Hook 的最早总预算由 CLI 限制为 1000 ms。程序先在内存中构造�
 - `PrivacySafe`：默认值，记录时间、项目、工具、决定和来源，不保存会话 ID、权限模式或工具输入。
 - `Detailed`：额外保存会话 ID、权限模式、工具输入和权限建议，可能包含敏感数据，只在确有需要时开启。
 
-日志位于 `%LOCALAPPDATA%\CCAutoApprove\logs`，可在“记录”页查看、刷新和确认后清空。设置模型虽然包含默认 7 天的保留值，当前 v1 启动流程却没有调用自动过期清理，因此不要依赖日志在 7 天后自动删除。离开 Detailed 时，界面会询问是否删除已有详细日志。等级变更会保存到设置；对已经创建的 `JsonLineAuditLog` 是否立即重配置尚待最终验证，稳妥做法是修改后退出并重启 App，再进行敏感操作。
+日志位于 `%LOCALAPPDATA%\CCAutoApprove\logs`，可在“记录”页查看、刷新和确认后清空。CLI 每次处理 Hook 请求时都会重新读取设置，所以日志等级从下一次请求起生效，不需要重启 App：Disabled 不写入，PrivacySafe 或 Detailed 按当前等级创建新的 `JsonLineAuditLog`。App 始终保留一个只供查看、计数、清空和过期清理使用的真实日志适配器；它本身不写批准记录，因此即使 App 启动时为 Disabled，稍后产生的 Detailed 记录也能被读取和确认删除。
+
+保留期默认 7 天。App 启动时会在两秒预算内调用过期清理；清理会响应取消，失败或超时不会阻止状态中心、托盘或自动批准功能启动，也不会把内部路径或错误显示给用户。离开 Detailed 时，界面会询问是否删除已有详细日志。
 
 ## 命令行诊断
 
@@ -89,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File scripts/publish.ps1 -Version 0.1.0
 powershell -ExecutionPolicy Bypass -File scripts/manual-acceptance.ps1
 ```
 
-脚本只显示说明并记录你输入的 `y`/`n`，不会启动或控制 Claude，不会安装/卸载 Hook，也不会写注册表或发送终端按键。验收记录默认由你指定到仓库或临时目录；不要提交含私人路径的记录。
+脚本只显示说明并记录你输入的 `y`/`n`，不会启动或控制 Claude，不会安装/卸载 Hook，也不会写注册表或发送终端按键。每个结果只含固定步骤编号、固定步骤文字和通过布尔值；脚本不收集备注或私人路径。输出位置由你指定到仓库或临时目录，验收记录不要提交。
 
 ## 项目结构
 

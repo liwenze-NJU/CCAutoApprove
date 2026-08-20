@@ -34,6 +34,10 @@ App 与 CLI 都引用 Infrastructure 和 Core，Infrastructure 引用 Core，Cor
 
 App 不直接替 Claude 做决定。`AppController` 保存所选项目并控制 `HeartbeatService`；`StatusViewModel`、`RecordsViewModel` 和 `SettingsViewModel` 把状态提供给 WPF 页面。App 停止或暂停后没有新鲜 heartbeat，CLI 就会安全降级。
 
+审计有两条不同生命周期。每个 Hook 请求都会启动新的 CLI 进程，`CliApplication` 重新读取 `PersistentSettings`：Disabled 使用 `NullAuditLog`，其余等级按当时设置创建新的 `JsonLineAuditLog`，所以写入等级从下一次请求起生效。长期运行的 App 不写权限决定；`AppAuditMaintenance` 始终为 `RecordsViewModel` 和 `SettingsViewModel` 提供真实 `JsonLineAuditLog`，只用于读取、计数、清空和过期维护。这样即使 App 在 Disabled 状态启动，之后由 CLI 写入的 Detailed 记录仍可被界面读取和删除。
+
+App 启动时，`AppAuditMaintenance.DeleteExpiredFailSafeAsync` 把 `AuditRetentionDays` 传给真实日志适配器，并用两秒的关联取消预算等待。清理成功才删除过期审计文件；失败、取消或超时都会被完整观察并安全吞掉，不能阻止状态中心和托盘继续启动，也不会显示内部路径。
+
 ## 接口与适配器
 
 接口描述“Core 需要什么”，适配器描述“Windows/文件系统如何做到”。例如：

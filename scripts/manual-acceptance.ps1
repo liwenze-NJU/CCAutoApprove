@@ -93,7 +93,8 @@ $steps = @(
 )
 
 $results = [System.Collections.Generic.List[object]]::new()
-foreach ($step in $steps) {
+for ($index = 0; $index -lt $steps.Count; $index++) {
+    $step = $steps[$index]
     Write-Host ''
     Write-Host $step
     Write-Host '请人工准备所述状态，并在真实 Claude 中触发一个无害权限请求。'
@@ -101,19 +102,15 @@ foreach ($step in $steps) {
         $answer = (Read-Host '实际结果符合描述吗？[y/n]').Trim().ToLowerInvariant()
     } while ($answer -notin @('y', 'n'))
 
-    $note = Read-Host '可选备注（不要填写私人绝对路径；直接回车跳过）'
     $results.Add([pscustomobject]@{
-        Step = $step
+        StepNumber = $index + 1
+        Text = $step
         Passed = $answer -eq 'y'
-        Note = if ([string]::IsNullOrWhiteSpace($note)) { $null } else { $note }
-        RecordedAtUtc = [DateTimeOffset]::UtcNow
     })
 }
 
 $record = [pscustomobject]@{
     SchemaVersion = 1
-    HumanConfirmed = $true
-    StartedByScript = $false
     RecordedAtUtc = [DateTimeOffset]::UtcNow
     PassedCount = @($results | Where-Object Passed).Count
     TotalCount = $results.Count
