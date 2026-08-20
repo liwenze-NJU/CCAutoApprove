@@ -71,12 +71,50 @@ public sealed class PublishedLayoutTests
             "The HKCU startup value must be removed before post-uninstall data/file cleanup.");
     }
 
+    [Fact]
+    public void PublishedLayoutFact_WhenPublishRootIsAbsent_Skips()
+    {
+        var attribute = new PublishedLayoutFactAttribute(configuredPublishRoot: null);
+
+        Assert.Equal(
+            "CCAA_PUBLISH_ROOT is not set; run this test against a published layout.",
+            attribute.Skip);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void PublishedLayoutFact_WhenPublishRootIsBlank_RunsAndRejectsRoot(string configuredPublishRoot)
+    {
+        var attribute = new PublishedLayoutFactAttribute(configuredPublishRoot);
+
+        Assert.Null(attribute.Skip);
+        ArgumentException exception = Assert.Throws<ArgumentException>(
+            () => GetPublishRoot(configuredPublishRoot));
+        Assert.Contains("CCAA_PUBLISH_ROOT", exception.Message, StringComparison.Ordinal);
+    }
+
     private static string GetPublishRootOrSkip()
     {
-        string configured = Environment.GetEnvironmentVariable("CCAA_PUBLISH_ROOT")
-            ?? throw new InvalidOperationException(
+        return GetPublishRoot(Environment.GetEnvironmentVariable("CCAA_PUBLISH_ROOT"));
+    }
+
+    internal static string GetPublishRoot(string? configuredPublishRoot)
+    {
+        if (configuredPublishRoot is null)
+        {
+            throw new InvalidOperationException(
                 "CCAA_PUBLISH_ROOT was removed after test discovery.");
-        return Path.GetFullPath(configured);
+        }
+
+        if (string.IsNullOrWhiteSpace(configuredPublishRoot))
+        {
+            throw new ArgumentException(
+                "CCAA_PUBLISH_ROOT must not be empty or whitespace.",
+                nameof(configuredPublishRoot));
+        }
+
+        return Path.GetFullPath(configuredPublishRoot);
     }
 
     private static string FindRepositoryRoot()
@@ -224,8 +262,13 @@ public sealed class PublishedLayoutTests
 public sealed class PublishedLayoutFactAttribute : FactAttribute
 {
     public PublishedLayoutFactAttribute()
+        : this(Environment.GetEnvironmentVariable("CCAA_PUBLISH_ROOT"))
     {
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CCAA_PUBLISH_ROOT")))
+    }
+
+    internal PublishedLayoutFactAttribute(string? configuredPublishRoot)
+    {
+        if (configuredPublishRoot is null)
         {
             Skip = "CCAA_PUBLISH_ROOT is not set; run this test against a published layout.";
         }
