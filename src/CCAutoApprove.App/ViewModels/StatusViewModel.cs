@@ -13,6 +13,8 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private string statusText;
     private string? errorMessage;
     private bool isEnabled;
+    private string hookHealthText;
+    private int todayApprovalCount;
 
     public StatusViewModel(AppController controller)
     {
@@ -21,8 +23,10 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         selectedProject = controller.SelectedProject;
         isEnabled = controller.IsEnabled;
         statusText = GetStatusText(controller.IsEnabled, controller.ErrorCode);
+        hookHealthText = StringResources.Get("HookHealthUnknown");
         errorMessage = controller.ErrorCode;
         ToggleApprovalCommand = new AsyncRelayCommand(ToggleApprovalAsync, HandleCommandErrorAsync);
+        ChooseProjectCommand = new RelayCommand(_ => ChooseProject());
         controller.StateChanged += OnControllerStateChanged;
     }
 
@@ -36,6 +40,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
             if (SetProperty(ref isEnabled, value))
             {
                 OnPropertyChanged(nameof(ToggleButtonText));
+                OnPropertyChanged(nameof(HeartbeatText));
             }
         }
     }
@@ -58,9 +63,47 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         private set => SetProperty(ref errorMessage, value);
     }
 
-    public string ToggleButtonText => IsEnabled ? "暂停自动批准" : "开启自动批准";
+    public string ToggleButtonText => IsEnabled
+        ? StringResources.Get("PauseApproval")
+        : StringResources.Get("EnableApproval");
+
+    public string HookHealthText
+    {
+        get => hookHealthText;
+        private set => SetProperty(ref hookHealthText, value);
+    }
+
+    public string HeartbeatText => IsEnabled
+        ? StringResources.Get("HeartbeatActive")
+        : StringResources.Get("HeartbeatStopped");
+
+    public string TodayApprovalCountText => string.Format(
+        System.Globalization.CultureInfo.CurrentCulture,
+        StringResources.Get("TodayApprovalCountFormat"),
+        todayApprovalCount);
+
+    public Func<string?>? ChooseProjectPath { get; set; }
 
     public AsyncRelayCommand ToggleApprovalCommand { get; }
+    public RelayCommand ChooseProjectCommand { get; }
+
+    public void SetHookHealth(bool operational) =>
+        HookHealthText = StringResources.Get(operational ? "HookHealthy" : "HookUnhealthy");
+
+    public void SetTodayApprovalCount(int count)
+    {
+        todayApprovalCount = Math.Max(0, count);
+        OnPropertyChanged(nameof(TodayApprovalCountText));
+    }
+
+    private void ChooseProject()
+    {
+        string? selected = ChooseProjectPath?.Invoke();
+        if (!string.IsNullOrWhiteSpace(selected))
+        {
+            SelectedProject = selected;
+        }
+    }
 
     private async Task ToggleApprovalAsync()
     {
@@ -108,10 +151,10 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     private static string GetStatusText(bool enabled, string? currentErrorCode) =>
         currentErrorCode is AppController.HeartbeatWriteFailed or AppController.SelectedProjectNotFound
-            ? "异常"
+            ? StringResources.Get("StatusError")
             : enabled
-                ? "正在自动批准"
-                : "已暂停";
+                ? StringResources.Get("StatusRunning")
+                : StringResources.Get("StatusPaused");
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

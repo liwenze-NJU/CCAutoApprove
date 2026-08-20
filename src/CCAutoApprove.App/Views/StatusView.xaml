@@ -1,0 +1,24 @@
+<UserControl x:Class="CCAutoApprove.App.Views.StatusView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+            <TextBlock Text="{Binding StatusText}" FontSize="28" FontWeight="SemiBold" />
+            <TextBlock Text="{DynamicResource ProjectLabel}" Margin="0,24,0,4" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding SelectedProject}" TextWrapping="Wrap" MinHeight="24" />
+            <WrapPanel Margin="0,16,0,20">
+                <Button Content="{DynamicResource ChooseProject}"
+                        Command="{Binding ChooseProjectCommand}"
+                        MinWidth="120" Margin="0,0,12,8" Padding="12,7" />
+                <Button Content="{Binding ToggleButtonText}"
+                        Command="{Binding ToggleApprovalCommand}"
+                        MinWidth="140" Margin="0,0,0,8" Padding="12,7" />
+            </WrapPanel>
+            <TextBlock Text="{DynamicResource HookHealthLabel}" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding HookHealthText}" Margin="0,4,0,12" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding HeartbeatText}" Margin="0,0,0,12" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding TodayApprovalCountText}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding ErrorMessage}" Foreground="Firebrick" Margin="0,16,0,0" TextWrapping="Wrap" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
