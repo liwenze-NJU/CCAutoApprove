@@ -74,6 +74,7 @@ try {
 
     & $dotnet publish 'src/CCAutoApprove.App/CCAutoApprove.App.csproj' `
         -c Release -r win-x64 "-p:Version=$Version" `
+        --self-contained true `
         -o 'artifacts/publish/win-x64/app'
     if ($LASTEXITCODE -ne 0) {
         throw "App publish failed with exit code $LASTEXITCODE."
@@ -81,6 +82,7 @@ try {
 
     & $dotnet publish 'src/CCAutoApprove.Cli/CCAutoApprove.Cli.csproj' `
         -c Release -r win-x64 "-p:Version=$Version" `
+        --self-contained true `
         -o 'artifacts/publish/win-x64/cli'
     if ($LASTEXITCODE -ne 0) {
         throw "CLI publish failed with exit code $LASTEXITCODE."

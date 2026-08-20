@@ -10,6 +10,6 @@
 *.user
 *.suo
 
-# Published artifacts and test results
+# Published artifacts, CI test results, and manual acceptance records
 artifacts/
 TestResults/

@@ -224,6 +224,7 @@ public sealed class AppControllerTests
 
         Task pauseTask = environment.Controller.PauseAsync(cancellation.Token);
         environment.RuntimeStore.BlockWrites = false;
+        environment.RuntimeStore.ReleaseBlockedWrite();
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pauseTask);
