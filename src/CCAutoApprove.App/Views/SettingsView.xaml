@@ -15,9 +15,9 @@
                 <TextBlock Text="{DynamicResource DetailedWarning}" TextWrapping="Wrap" />
             </Border>
 
-            <CheckBox Content="{DynamicResource StartupLabel}" IsChecked="{Binding StartupEnabled}"
-                      IsEnabled="{Binding CanChangeStartup}" Margin="0,4,0,4" />
-            <TextBlock Text="{DynamicResource StartupUnavailable}" Foreground="DimGray" Margin="20,0,0,20" TextWrapping="Wrap" />
+            <CheckBox Content="{DynamicResource StartupLabel}" IsChecked="{Binding StartupEnabled, Mode=OneWay}"
+                      IsEnabled="{Binding CanChangeStartup}" Command="{Binding ChangeStartupEnabledCommand}"
+                      CommandParameter="{Binding IsChecked, RelativeSource={RelativeSource Self}}" Margin="0,4,0,20" />
 
             <TextBlock Text="{DynamicResource HookActionsTitle}" FontSize="20" FontWeight="SemiBold" />
             <WrapPanel Margin="0,12,0,0">

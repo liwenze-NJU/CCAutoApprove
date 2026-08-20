@@ -11,6 +11,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 {
     private readonly ISettingsStore settingsStore;
     private readonly IAuditLog auditLog;
+    private readonly IStartupManager startupManager;
     private readonly Func<Task<bool>> confirmDeleteDetailedLogsAsync;
     private readonly Func<Task> installHookAsync;
     private readonly Func<Task> runDoctorAsync;
@@ -31,7 +32,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         Func<Task<bool>> confirmDeleteDetailedLogsAsync,
         Func<Task>? installHookAsync = null,
         Func<Task>? runDoctorAsync = null,
-        Func<Task>? uninstallHookAsync = null)
+        Func<Task>? uninstallHookAsync = null,
+        IStartupManager? startupManager = null)
     {
         this.settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         this.auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
@@ -40,12 +42,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         this.installHookAsync = installHookAsync ?? (() => Task.CompletedTask);
         this.runDoctorAsync = runDoctorAsync ?? (() => Task.CompletedTask);
         this.uninstallHookAsync = uninstallHookAsync ?? (() => Task.CompletedTask);
+        this.startupManager = startupManager ?? new DisabledStartupManager();
         SelectDisabledCommand = CreateAuditCommand(AuditDetailLevel.Disabled);
         SelectPrivacySafeCommand = CreateAuditCommand(AuditDetailLevel.PrivacySafe);
         SelectDetailedCommand = CreateAuditCommand(AuditDetailLevel.Detailed);
         InstallHookCommand = CreateOperationCommand(this.installHookAsync);
         DoctorCommand = CreateOperationCommand(this.runDoctorAsync);
         UninstallHookCommand = CreateOperationCommand(this.uninstallHookAsync);
+        ChangeStartupEnabledCommand = new RelayCommand(async parameter =>
+            await ChangeStartupEnabledAsync(parameter is true));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -77,7 +82,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         private set => SetProperty(ref startupEnabled, value);
     }
 
-    public bool CanChangeStartup => false;
+    public bool CanChangeStartup => true;
 
     public string? OperationMessage
     {
@@ -91,12 +96,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public AsyncRelayCommand InstallHookCommand { get; }
     public AsyncRelayCommand DoctorCommand { get; }
     public AsyncRelayCommand UninstallHookCommand { get; }
+    public RelayCommand ChangeStartupEnabledCommand { get; }
 
     public async Task LoadAsync()
     {
         settings = await settingsStore.LoadAsync(CancellationToken.None);
         AuditDetailLevel = settings.AuditDetailLevel;
-        StartupEnabled = settings.StartWithWindows;
+        StartupEnabled = startupManager.IsEnabled();
     }
 
     public async Task ChangeAuditDetailLevelAsync(AuditDetailLevel newLevel)
@@ -117,6 +123,36 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         if (deleteExistingLogs)
         {
             await auditLog.ClearAsync(CancellationToken.None);
+        }
+    }
+
+    public async Task ChangeStartupEnabledAsync(bool enabled)
+    {
+        if (enabled == StartupEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            if (enabled)
+            {
+                startupManager.Enable();
+            }
+            else
+            {
+                startupManager.Disable();
+            }
+
+            PersistentSettings updated = settings with { StartWithWindows = enabled };
+            await settingsStore.SaveAsync(updated, CancellationToken.None);
+            settings = updated;
+            StartupEnabled = enabled;
+            OperationMessage = null;
+        }
+        catch (Exception exception)
+        {
+            OperationMessage = exception.Message;
         }
     }
 
@@ -177,5 +213,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             CancellationToken cancellationToken) => Task.FromResult(0);
         public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class DisabledStartupManager : IStartupManager
+    {
+        public bool IsEnabled() => false;
+        public void Enable() { }
+        public void Disable() { }
     }
 }

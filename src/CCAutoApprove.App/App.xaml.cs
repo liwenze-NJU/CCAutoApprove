@@ -72,7 +72,8 @@ public partial class App : System.Windows.Application
                 ConfirmDeleteDetailedLogsAsync,
                 () => hookManager.InstallAsync(CancellationToken.None),
                 async () => _ = await doctor.RunAsync(CancellationToken.None),
-                () => hookManager.UninstallAsync(CancellationToken.None));
+                () => hookManager.UninstallAsync(CancellationToken.None),
+                new WindowsStartupManager(ResolveAppExecutablePath()));
             await records.LoadAsync();
             await settingsViewModel.LoadAsync();
             status.SetHookHealth(await doctor.IsOperationalAsync(CancellationToken.None));
@@ -88,7 +89,10 @@ public partial class App : System.Windows.Application
             MainWindow = mainWindow;
             trayService = new TrayIconService(controller, mainViewModel, mainWindow);
             mainWindow.AttachTray(trayService);
-            mainWindow.Show();
+            if (ShouldShowMainWindow(e.Args))
+            {
+                mainWindow.Show();
+            }
         }
         catch
         {
@@ -148,4 +152,12 @@ public partial class App : System.Windows.Application
         string appDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? AppContext.BaseDirectory;
         return Path.Combine(appDirectory, "CCAutoApprove.Cli.exe");
     }
+
+    private static string ResolveAppExecutablePath() =>
+        Environment.ProcessPath
+        ?? Assembly.GetEntryAssembly()?.Location
+        ?? Assembly.GetExecutingAssembly().Location;
+
+    internal static bool ShouldShowMainWindow(IEnumerable<string> arguments) =>
+        !arguments.Any(argument => string.Equals(argument, "--minimized", StringComparison.OrdinalIgnoreCase));
 }

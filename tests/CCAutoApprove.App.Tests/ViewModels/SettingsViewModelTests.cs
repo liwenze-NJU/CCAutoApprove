@@ -1,4 +1,5 @@
 using CCAutoApprove.App.ViewModels;
+using CCAutoApprove.App;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
 
@@ -6,6 +7,16 @@ namespace CCAutoApprove.App.Tests.ViewModels;
 
 public sealed class SettingsViewModelTests
 {
+    [Theory]
+    [InlineData(new[] { "--minimized" }, false)]
+    [InlineData(new[] { "--MINIMIZED" }, false)]
+    [InlineData(new[] { "--minimized=true" }, true)]
+    [InlineData(new string[0], true)]
+    public void ShouldShowMainWindow_OnlySuppressesBareMinimizedArgument(string[] arguments, bool expected)
+    {
+        Assert.Equal(expected, App.ShouldShowMainWindow(arguments));
+    }
+
     [Fact]
     public async Task ChangeAuditDetailLevelAsync_FromDetailedToPrivacySafe_DeletesWhenUserChoosesDelete()
     {
@@ -65,18 +76,46 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task LoadAsync_ExposesStartupAsReadOnlyDisabledControlState()
+    public async Task ChangeStartupEnabledAsync_WhenEnabled_RegistersStartupBeforePersistingSetting()
     {
-        var settingsStore = new FakeSettingsStore(new PersistentSettings(StartWithWindows: true));
-        var viewModel = new SettingsViewModel(settingsStore, new FakeAuditLog(), () => Task.FromResult(false));
-
+        var operations = new List<string>();
+        var settingsStore = new FakeSettingsStore(new PersistentSettings(), operations);
+        var startupManager = new FakeStartupManager(operations);
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
         await viewModel.LoadAsync();
 
+        await viewModel.ChangeStartupEnabledAsync(true);
+
         Assert.True(viewModel.StartupEnabled);
-        Assert.False(viewModel.CanChangeStartup);
+        Assert.True(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["enable", "save"], operations);
     }
 
-    private sealed class FakeSettingsStore(PersistentSettings settings) : ISettingsStore
+    [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenRegistryFails_PreservesCheckboxAndPersistedSetting()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings(StartWithWindows: false));
+        var startupManager = new FakeStartupManager { EnableException = new IOException("Registry is unavailable.") };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.False(viewModel.StartupEnabled);
+        Assert.False(settingsStore.Settings.StartWithWindows);
+        Assert.Equal("Registry is unavailable.", viewModel.OperationMessage);
+        Assert.Equal(["enable"], startupManager.Operations);
+    }
+
+    private sealed class FakeSettingsStore(PersistentSettings settings, List<string>? operations = null) : ISettingsStore
     {
         public PersistentSettings Settings { get; private set; } = settings;
 
@@ -84,6 +123,7 @@ public sealed class SettingsViewModelTests
 
         public Task SaveAsync(PersistentSettings settings, CancellationToken cancellationToken)
         {
+            operations?.Add("save");
             Settings = settings;
             return Task.CompletedTask;
         }
@@ -111,5 +151,33 @@ public sealed class SettingsViewModelTests
         }
 
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class FakeStartupManager : IStartupManager
+    {
+        public FakeStartupManager(List<string>? operations = null) => Operations = operations ?? [];
+
+        public List<string> Operations { get; }
+        public Exception? EnableException { get; init; }
+        public bool Enabled { get; private set; }
+
+        public bool IsEnabled() => Enabled;
+
+        public void Enable()
+        {
+            Operations.Add("enable");
+            if (EnableException is not null)
+            {
+                throw EnableException;
+            }
+
+            Enabled = true;
+        }
+
+        public void Disable()
+        {
+            Operations.Add("disable");
+            Enabled = false;
+        }
     }
 }
