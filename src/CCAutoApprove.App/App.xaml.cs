@@ -76,9 +76,8 @@ public partial class App : System.Windows.Application
             await records.LoadAsync();
             await settingsViewModel.LoadAsync();
             status.SetHookHealth(await doctor.IsOperationalAsync(CancellationToken.None));
-            DateTimeOffset today = DateTimeOffset.Now.Date;
-            status.SetTodayApprovalCount(records.Records.Count(record =>
-                record.Decision == ApprovalDecisionKind.Allow && record.TimeUtc.ToLocalTime() >= today));
+            DateOnly today = DateOnly.FromDateTime(DateTime.Now);
+            status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(today));
 
             var mainViewModel = new MainViewModel(status, records, settingsViewModel);
             var mainWindow = new MainWindow(mainViewModel);

@@ -24,9 +24,9 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         isEnabled = controller.IsEnabled;
         statusText = GetStatusText(controller.IsEnabled, controller.ErrorCode);
         hookHealthText = StringResources.Get("HookHealthUnknown");
-        errorMessage = controller.ErrorCode;
+        errorMessage = GetErrorMessage(controller.ErrorCode);
         ToggleApprovalCommand = new AsyncRelayCommand(ToggleApprovalAsync, HandleCommandErrorAsync);
-        ChooseProjectCommand = new RelayCommand(_ => ChooseProject());
+        ChooseProjectCommand = new RelayCommand(_ => ChooseProject(), _ => !IsEnabled);
         controller.StateChanged += OnControllerStateChanged;
     }
 
@@ -41,6 +41,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
             {
                 OnPropertyChanged(nameof(ToggleButtonText));
                 OnPropertyChanged(nameof(HeartbeatText));
+                ChooseProjectCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -98,6 +99,12 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     private void ChooseProject()
     {
+        if (controller.IsEnabled)
+        {
+            ErrorMessage = StringResources.Get("PauseBeforeChangingProject");
+            return;
+        }
+
         string? selected = ChooseProjectPath?.Invoke();
         if (!string.IsNullOrWhiteSpace(selected))
         {
@@ -120,7 +127,9 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     private Task HandleCommandErrorAsync(Exception exception)
     {
-        RunOnCapturedContext(() => ErrorMessage = exception.Message);
+        RunOnCapturedContext(() =>
+            ErrorMessage = GetErrorMessage(controller.ErrorCode)
+                ?? StringResources.Get("ErrorOperationFailed"));
         return Task.CompletedTask;
     }
 
@@ -132,7 +141,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         string? controllerError = controller.ErrorCode;
         IsEnabled = controller.IsEnabled;
         StatusText = GetStatusText(controller.IsEnabled, controllerError);
-        ErrorMessage = controllerError;
+        ErrorMessage = GetErrorMessage(controllerError);
         if (controllerError is null or AppController.HeartbeatWriteFailed)
         {
             SelectedProject = controller.SelectedProject;
@@ -155,6 +164,16 @@ public sealed class StatusViewModel : INotifyPropertyChanged
             : enabled
                 ? StringResources.Get("StatusRunning")
                 : StringResources.Get("StatusPaused");
+
+    private static string? GetErrorMessage(string? errorCode) => errorCode switch
+    {
+        null => null,
+        AppController.SelectedProjectRequired => StringResources.Get("ErrorSelectedProjectRequired"),
+        AppController.SelectedProjectNotFound => StringResources.Get("ErrorSelectedProjectNotFound"),
+        AppController.HookNotOperational => StringResources.Get("ErrorHookNotOperational"),
+        AppController.HeartbeatWriteFailed => StringResources.Get("ErrorHeartbeatWriteFailed"),
+        _ => StringResources.Get("ErrorOperationFailed")
+    };
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

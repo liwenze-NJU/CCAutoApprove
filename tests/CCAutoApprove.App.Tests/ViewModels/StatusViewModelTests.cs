@@ -57,8 +57,54 @@ public sealed class StatusViewModelTests
 
         await viewModel.ToggleApprovalCommand.ExecuteAsync();
 
-        Assert.Equal("Simulated runtime-state write failure.", viewModel.ErrorMessage);
+        Assert.Equal("心跳写入失败，自动批准已暂停。", viewModel.ErrorMessage);
+        Assert.DoesNotContain(AppController.HeartbeatWriteFailed, viewModel.ErrorMessage);
         Assert.False(viewModel.IsEnabled);
+    }
+
+    [Theory]
+    [InlineData("", true, true, "请先选择项目。")]
+    [InlineData(@"D:\projects\missing", false, true, "所选项目不存在。")]
+    [InlineData(ProjectPath, true, false, "Hook 状态异常，请先运行检查。")]
+    public async Task ToggleApprovalCommand_WhenPrerequisiteFails_ShowsLocalizedDiagnostic(
+        string project,
+        bool directoryExists,
+        bool hookOperational,
+        string expectedMessage)
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync(
+            directoryExists: directoryExists,
+            hookOperational: hookOperational);
+        var viewModel = new StatusViewModel(environment.Controller)
+        {
+            SelectedProject = project
+        };
+
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+
+        Assert.Equal(expectedMessage, viewModel.ErrorMessage);
+        Assert.DoesNotContain(environment.Controller.ErrorCode!, viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ChooseProjectCommand_WhileEnabled_RejectsReplacementWithoutChangingRunningProject()
+    {
+        const string replacementProject = @"D:\projects\replacement";
+        await using var environment = await ViewModelEnvironment.CreateAsync(ProjectPath);
+        var viewModel = new StatusViewModel(environment.Controller)
+        {
+            ChooseProjectPath = () => replacementProject
+        };
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+
+        Assert.False(viewModel.ChooseProjectCommand.CanExecute(null));
+        viewModel.ChooseProjectCommand.Execute(null);
+
+        Assert.Equal(ProjectPath, viewModel.SelectedProject);
+        Assert.Equal(ProjectPath, environment.Controller.SelectedProject);
+        Assert.Equal(ProjectPath, environment.SettingsStore.Settings.SelectedProject);
+        Assert.Equal(ProjectPath, environment.RuntimeStore.SuccessfulStates[^1].SelectedProject);
+        Assert.Equal("请先暂停自动批准，再更改项目。", viewModel.ErrorMessage);
     }
 
     [Fact]
@@ -74,19 +120,32 @@ public sealed class StatusViewModelTests
         Assert.Same(status, main.Status);
         Assert.Same(records, main.Records);
         Assert.Same(settings, main.Settings);
+
+        await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.Detailed);
+
+        Assert.Equal(AuditDetailLevel.Detailed, records.AuditDetailLevel);
+
+        await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.PrivacySafe);
+
+        Assert.Equal(AuditDetailLevel.PrivacySafe, records.AuditDetailLevel);
     }
 
     private sealed class ViewModelEnvironment(
         AppController controller,
         HeartbeatService heartbeat,
         RecordingRuntimeStateStore runtimeStore,
-        FakeHeartbeatTimer timer) : IAsyncDisposable
+        FakeHeartbeatTimer timer,
+        StatusSettingsStore settingsStore) : IAsyncDisposable
     {
         public AppController Controller { get; } = controller;
         public RecordingRuntimeStateStore RuntimeStore { get; } = runtimeStore;
         public FakeHeartbeatTimer Timer { get; } = timer;
+        public StatusSettingsStore SettingsStore { get; } = settingsStore;
 
-        public static async Task<ViewModelEnvironment> CreateAsync()
+        public static async Task<ViewModelEnvironment> CreateAsync(
+            string? selectedProject = null,
+            bool directoryExists = true,
+            bool hookOperational = true)
         {
             var runtimeStore = new RecordingRuntimeStateStore();
             var timer = new FakeHeartbeatTimer();
@@ -94,33 +153,41 @@ public sealed class StatusViewModelTests
                 new FakeClock(new DateTimeOffset(2026, 8, 17, 3, 0, 0, TimeSpan.Zero)),
                 new FakeCurrentProcessInfo(8112,
                     new DateTimeOffset(2026, 8, 17, 2, 59, 0, TimeSpan.Zero)),
-                new ExistingDirectoryService(), timer);
-            var controller = new AppController(new StatusSettingsStore(),
-                new ExistingDirectoryService(), new OperationalHookHealthService(), heartbeat);
+                new ConfigurableDirectoryService(directoryExists), timer);
+            var settingsStore = new StatusSettingsStore(new PersistentSettings(SelectedProject: selectedProject));
+            var controller = new AppController(settingsStore,
+                new ConfigurableDirectoryService(directoryExists),
+                new ConfigurableHookHealthService(hookOperational),
+                heartbeat);
             await controller.InitializeAsync(CancellationToken.None);
-            return new ViewModelEnvironment(controller, heartbeat, runtimeStore, timer);
+            return new ViewModelEnvironment(controller, heartbeat, runtimeStore, timer, settingsStore);
         }
 
         public ValueTask DisposeAsync() => heartbeat.DisposeAsync();
     }
 
-    private sealed class StatusSettingsStore : ISettingsStore
+    public sealed class StatusSettingsStore(PersistentSettings settings) : ISettingsStore
     {
+        public PersistentSettings Settings { get; private set; } = settings;
+
         public Task<PersistentSettings> LoadAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(new PersistentSettings());
+            Task.FromResult(Settings);
 
-        public Task SaveAsync(PersistentSettings settings, CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+        public Task SaveAsync(PersistentSettings settings, CancellationToken cancellationToken)
+        {
+            Settings = settings;
+            return Task.CompletedTask;
+        }
     }
 
-    private sealed class ExistingDirectoryService : IDirectoryService
+    private sealed class ConfigurableDirectoryService(bool exists) : IDirectoryService
     {
-        public bool Exists(string path) => true;
+        public bool Exists(string path) => exists;
     }
 
-    private sealed class OperationalHookHealthService : IHookHealthService
+    private sealed class ConfigurableHookHealthService(bool operational) : IHookHealthService
     {
-        public Task<bool> IsOperationalAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> IsOperationalAsync(CancellationToken cancellationToken) => Task.FromResult(operational);
     }
 }
 

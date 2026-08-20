@@ -12,8 +12,8 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
     private const int MaximumRecordCount = 200;
     private readonly IAuditLog auditLog;
     private readonly Func<Task<bool>> confirmClearAsync;
-    private readonly AuditDetailLevel auditDetailLevel;
-    private AuditRecord? selectedRecord;
+    private AuditDetailLevel auditDetailLevel;
+    private AuditRecordItemViewModel? selectedRecord;
     private string? errorMessage;
 
     public RecordsViewModel()
@@ -35,9 +35,10 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ObservableCollection<AuditRecord> Records { get; } = [];
+    public ObservableCollection<AuditRecordItemViewModel> Records { get; } = [];
+    public AuditDetailLevel AuditDetailLevel => auditDetailLevel;
 
-    public AuditRecord? SelectedRecord
+    public AuditRecordItemViewModel? SelectedRecord
     {
         get => selectedRecord;
         set
@@ -56,8 +57,8 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
     public bool ShowDetails => auditDetailLevel == AuditDetailLevel.Detailed && SelectedRecord is not null;
     public string? SelectedSessionId => ShowDetails ? SelectedRecord?.SessionId : null;
     public string? SelectedPermissionMode => ShowDetails ? SelectedRecord?.PermissionMode : null;
-    public string? SelectedToolInput => ShowDetails ? SelectedRecord?.ToolInput?.GetRawText() : null;
-    public string? SelectedPermissionSuggestions => ShowDetails ? SelectedRecord?.PermissionSuggestions?.GetRawText() : null;
+    public string? SelectedToolInput => ShowDetails ? SelectedRecord?.ToolInput : null;
+    public string? SelectedPermissionSuggestions => ShowDetails ? SelectedRecord?.PermissionSuggestions : null;
 
     public string? ErrorMessage
     {
@@ -67,6 +68,22 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
     public AsyncRelayCommand ClearCommand { get; }
     public AsyncRelayCommand RefreshCommand { get; }
+
+    public void SetAuditDetailLevel(AuditDetailLevel detailLevel)
+    {
+        if (auditDetailLevel == detailLevel)
+        {
+            return;
+        }
+
+        auditDetailLevel = detailLevel;
+        OnPropertyChanged(nameof(AuditDetailLevel));
+        OnPropertyChanged(nameof(ShowDetails));
+        OnPropertyChanged(nameof(SelectedSessionId));
+        OnPropertyChanged(nameof(SelectedPermissionMode));
+        OnPropertyChanged(nameof(SelectedToolInput));
+        OnPropertyChanged(nameof(SelectedPermissionSuggestions));
+    }
 
     public async Task LoadAsync()
     {
@@ -79,10 +96,20 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
                      .OrderByDescending(item => item.TimeUtc)
                      .Take(MaximumRecordCount))
         {
-            Records.Add(record);
+            Records.Add(new AuditRecordItemViewModel(record));
         }
 
         SelectedRecord = Records.FirstOrDefault();
+    }
+
+    public async Task<int> CountTodayApprovalsAsync(DateOnly localDate)
+    {
+        IReadOnlyList<AuditRecord> allRecords = await auditLog.ReadRecentAsync(
+            int.MaxValue,
+            CancellationToken.None);
+        return allRecords.Count(record =>
+            record.Decision == ApprovalDecisionKind.Allow
+            && DateOnly.FromDateTime(record.TimeUtc.ToLocalTime().DateTime) == localDate);
     }
 
     private async Task ClearAsync()

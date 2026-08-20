@@ -8,6 +8,7 @@
     <sys:String x:Key="EnableApproval">开启自动批准</sys:String>
     <sys:String x:Key="PauseApproval">暂停自动批准</sys:String>
     <sys:String x:Key="ChooseProject">选择项目</sys:String>
+    <sys:String x:Key="PauseBeforeChangingProject">请先暂停自动批准，再更改项目。</sys:String>
     <sys:String x:Key="ExitApplication">退出</sys:String>
     <sys:String x:Key="OpenMainWindow">打开状态中心</sys:String>
     <sys:String x:Key="StatusPaused">已暂停</sys:String>
@@ -31,6 +32,15 @@
     <sys:String x:Key="ColumnTool">工具</sys:String>
     <sys:String x:Key="ColumnDecision">决定</sys:String>
     <sys:String x:Key="ColumnSource">来源</sys:String>
+    <sys:String x:Key="DecisionAllow">允许</sys:String>
+    <sys:String x:Key="DecisionDeny">拒绝</sys:String>
+    <sys:String x:Key="DecisionAsk">询问</sys:String>
+    <sys:String x:Key="SourceLocalAlwaysAllow">本地始终允许</sys:String>
+    <sys:String x:Key="SourceLocalRule">本地规则</sys:String>
+    <sys:String x:Key="SourceAI">人工智能</sys:String>
+    <sys:String x:Key="SourceRemotePhone">远程手机</sys:String>
+    <sys:String x:Key="SourceHumanDesktop">桌面人工确认</sys:String>
+    <sys:String x:Key="ValueUnknown">未知</sys:String>
     <sys:String x:Key="DetailsTitle">详细信息</sys:String>
     <sys:String x:Key="SessionIdLabel">会话 ID</sys:String>
     <sys:String x:Key="PermissionModeLabel">权限模式</sys:String>
@@ -51,6 +61,11 @@
     <sys:String x:Key="UninstallHook">卸载 Hook</sys:String>
     <sys:String x:Key="OperationCompleted">操作已完成。</sys:String>
     <sys:String x:Key="ApplicationStartFailed">CCAutoApprove 启动失败，请检查本地配置。</sys:String>
+    <sys:String x:Key="ErrorSelectedProjectRequired">请先选择项目。</sys:String>
+    <sys:String x:Key="ErrorSelectedProjectNotFound">所选项目不存在。</sys:String>
+    <sys:String x:Key="ErrorHookNotOperational">Hook 状态异常，请先运行检查。</sys:String>
+    <sys:String x:Key="ErrorHeartbeatWriteFailed">心跳写入失败，自动批准已暂停。</sys:String>
+    <sys:String x:Key="ErrorOperationFailed">操作失败，请重试。</sys:String>
     <sys:String x:Key="TrayStatusFormat">状态：{0}</sys:String>
     <sys:String x:Key="TrayProjectFormat">项目：{0}</sys:String>
     <sys:String x:Key="SecondInstanceMessage">CCAutoApprove 已经在运行，请查看系统托盘。</sys:String>

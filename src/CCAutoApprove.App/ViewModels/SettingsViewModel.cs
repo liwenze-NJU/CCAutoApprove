@@ -49,6 +49,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event Action<AuditDetailLevel>? AuditDetailLevelChanged;
 
     public AuditDetailLevel AuditDetailLevel
     {
@@ -112,6 +113,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         await settingsStore.SaveAsync(updated, CancellationToken.None);
         settings = updated;
         AuditDetailLevel = newLevel;
+        AuditDetailLevelChanged?.Invoke(newLevel);
         if (deleteExistingLogs)
         {
             await auditLog.ClearAsync(CancellationToken.None);

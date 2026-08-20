@@ -72,6 +72,84 @@ public sealed class RecordsViewModelTests
         Assert.Null(privacyViewModel.SelectedSessionId);
     }
 
+    [Fact]
+    public async Task SetAuditDetailLevel_EnteringAndLeavingDetailed_UpdatesVisibleDetails()
+    {
+        AuditRecord detailed = CreateRecord(1, detailed: true);
+        var viewModel = new RecordsViewModel(
+            new FakeAuditLog([detailed]),
+            () => Task.FromResult(false),
+            AuditDetailLevel.PrivacySafe);
+        await viewModel.LoadAsync();
+
+        Assert.False(viewModel.ShowDetails);
+
+        viewModel.SetAuditDetailLevel(AuditDetailLevel.Detailed);
+
+        Assert.True(viewModel.ShowDetails);
+        Assert.Equal("session-1", viewModel.SelectedSessionId);
+
+        viewModel.SetAuditDetailLevel(AuditDetailLevel.PrivacySafe);
+
+        Assert.False(viewModel.ShowDetails);
+        Assert.Null(viewModel.SelectedSessionId);
+    }
+
+    [Fact]
+    public async Task CountTodayApprovalsAsync_MoreThanDisplayLimit_CountsAllTodayApprovals()
+    {
+        var today = new DateOnly(2026, 8, 20);
+        AuditRecord[] records = Enumerable.Range(0, 250)
+            .Select(index => CreateCountRecord(today, index, ApprovalDecisionKind.Allow))
+            .Concat(Enumerable.Range(250, 10)
+                .Select(index => CreateCountRecord(today, index, ApprovalDecisionKind.Deny)))
+            .Concat(Enumerable.Range(260, 5)
+                .Select(index => CreateCountRecord(today.AddDays(-1), index, ApprovalDecisionKind.Allow)))
+            .ToArray();
+        var auditLog = new FakeAuditLog(records);
+        var viewModel = new RecordsViewModel(auditLog, () => Task.FromResult(false));
+
+        int count = await viewModel.CountTodayApprovalsAsync(today);
+
+        Assert.Equal(250, count);
+        Assert.Equal(int.MaxValue, auditLog.LastMaximumCount);
+    }
+
+    [Theory]
+    [InlineData(ApprovalDecisionKind.Allow, "允许")]
+    [InlineData(ApprovalDecisionKind.Deny, "拒绝")]
+    [InlineData(ApprovalDecisionKind.Ask, "询问")]
+    public void AuditRecordItemViewModel_LocalizesDecision(
+        ApprovalDecisionKind decision,
+        string expected)
+    {
+        AuditRecord record = CreateCountRecord(new DateOnly(2026, 8, 20), 1, decision);
+
+        var item = new AuditRecordItemViewModel(record);
+
+        Assert.Equal(expected, item.DecisionText);
+        Assert.NotEqual(decision.ToString(), item.DecisionText);
+    }
+
+    [Theory]
+    [InlineData(DecisionSource.LocalAlwaysAllow, "本地始终允许")]
+    [InlineData(DecisionSource.LocalRule, "本地规则")]
+    [InlineData(DecisionSource.AI, "人工智能")]
+    [InlineData(DecisionSource.RemotePhone, "远程手机")]
+    [InlineData(DecisionSource.HumanDesktop, "桌面人工确认")]
+    public void AuditRecordItemViewModel_LocalizesSource(
+        DecisionSource source,
+        string expected)
+    {
+        AuditRecord record = CreateCountRecord(new DateOnly(2026, 8, 20), 1, ApprovalDecisionKind.Allow)
+            with { Source = source };
+
+        var item = new AuditRecordItemViewModel(record);
+
+        Assert.Equal(expected, item.SourceText);
+        Assert.NotEqual(source.ToString(), item.SourceText);
+    }
+
     private static IReadOnlyList<AuditRecord> CreateRecords(int count) =>
         Enumerable.Range(0, count).Select(index => CreateRecord(index, detailed: false)).ToArray();
 
@@ -88,6 +166,24 @@ public sealed class RecordsViewModelTests
             detailed ? $"session-{index}" : null,
             detailed ? "default" : null,
             toolInput);
+    }
+
+    private static AuditRecord CreateCountRecord(
+        DateOnly localDate,
+        int index,
+        ApprovalDecisionKind decision)
+    {
+        DateTime localTime = localDate.ToDateTime(new TimeOnly(12, 0), DateTimeKind.Unspecified);
+        DateTimeOffset timeUtc = new DateTimeOffset(localTime, TimeZoneInfo.Local.GetUtcOffset(localTime))
+            .ToUniversalTime()
+            .AddSeconds(index);
+        return new AuditRecord(
+            timeUtc,
+            new Guid(index, 0, 0, new byte[8]),
+            @"D:\projects\sample",
+            "Bash",
+            decision,
+            DecisionSource.LocalAlwaysAllow);
     }
 
     private sealed class FakeAuditLog(IReadOnlyList<AuditRecord> records) : IAuditLog

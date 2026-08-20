@@ -13,6 +13,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Status = status ?? throw new ArgumentNullException(nameof(status));
         Records = records ?? throw new ArgumentNullException(nameof(records));
         Settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        Settings.AuditDetailLevelChanged += Records.SetAuditDetailLevel;
         StatusPage = new NavigationPage(StringResources.Get("NavStatus"), Status);
         RecordsPage = new NavigationPage(StringResources.Get("NavRecords"), Records);
         SettingsPage = new NavigationPage(StringResources.Get("NavSettings"), Settings);

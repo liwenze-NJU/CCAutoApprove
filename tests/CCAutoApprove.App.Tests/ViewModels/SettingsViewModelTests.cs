@@ -33,12 +33,15 @@ public sealed class SettingsViewModelTests
         var settingsStore = new FakeSettingsStore(new PersistentSettings(AuditDetailLevel: AuditDetailLevel.Detailed));
         var auditLog = new FakeAuditLog();
         var viewModel = new SettingsViewModel(settingsStore, auditLog, () => Task.FromResult(false));
+        var changedLevels = new List<AuditDetailLevel>();
+        viewModel.AuditDetailLevelChanged += changedLevels.Add;
         await viewModel.LoadAsync();
 
         await viewModel.ChangeAuditDetailLevelAsync(AuditDetailLevel.PrivacySafe);
 
         Assert.False(auditLog.ClearCalled);
         Assert.Equal(AuditDetailLevel.PrivacySafe, settingsStore.Settings.AuditDetailLevel);
+        Assert.Equal([AuditDetailLevel.PrivacySafe], changedLevels);
     }
 
     [Fact]
