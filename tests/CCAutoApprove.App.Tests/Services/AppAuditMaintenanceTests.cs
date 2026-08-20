@@ -72,7 +72,7 @@ public sealed class AppAuditMaintenanceTests
         };
 
         Task<Task> startup = AppAuditMaintenance.InitializeThenScheduleAsync(
-            async () =>
+            async _ =>
             {
                 events.Add("initialization-started");
                 initializationEntered.SetResult();
@@ -99,6 +99,110 @@ public sealed class AppAuditMaintenanceTests
 
         allowRetentionToComplete.SetResult();
         await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task StartupLifecycle_ShutdownWhileInitializationIsIncomplete_SkipsUiAndRetentionWithoutFailure()
+    {
+        var initializationEntered = CreateCompletionSource();
+        var allowInitializationToResume = CreateCompletionSource();
+        var lifetime = new CancellationTokenSource();
+        CancellationToken capturedToken = lifetime.Token;
+        var log = new RecordingAuditLog();
+        Task? backgroundMaintenance = null;
+        bool uiContinuationRan = false;
+        bool failureCallbackRan = false;
+
+        Task startup = AppStartupLifecycle.RunAsync(
+            async lifetimeToken =>
+            {
+                backgroundMaintenance = await AppAuditMaintenance.InitializeThenScheduleAsync(
+                    async startupToken =>
+                    {
+                        initializationEntered.SetResult();
+                        await allowInitializationToResume.Task;
+                        startupToken.ThrowIfCancellationRequested();
+                        uiContinuationRan = true;
+                    },
+                    log,
+                    7,
+                    TimeSpan.FromSeconds(1),
+                    lifetimeToken);
+            },
+            () => failureCallbackRan = true,
+            capturedToken);
+
+        await initializationEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        AppAuditMaintenance.CancelLifetimeWithoutWaiting(lifetime, backgroundTask: null);
+        allowInitializationToResume.SetResult();
+        await startup.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(capturedToken.IsCancellationRequested);
+        Assert.False(uiContinuationRan);
+        Assert.False(failureCallbackRan);
+        Assert.Null(backgroundMaintenance);
+        Assert.Null(log.RetentionDays);
+    }
+
+    [Fact]
+    public async Task StartupLifecycle_CancellationAfterInitializationBeforeScheduling_SkipsRetentionWithoutFailure()
+    {
+        var lifetime = new CancellationTokenSource();
+        CancellationToken capturedToken = lifetime.Token;
+        var log = new RecordingAuditLog();
+        Task? backgroundMaintenance = null;
+        bool initializationCompleted = false;
+        bool failureCallbackRan = false;
+
+        await AppStartupLifecycle.RunAsync(
+            async lifetimeToken =>
+            {
+                backgroundMaintenance = await AppAuditMaintenance.InitializeThenScheduleAsync(
+                    _ =>
+                    {
+                        initializationCompleted = true;
+                        AppAuditMaintenance.CancelLifetimeWithoutWaiting(
+                            lifetime,
+                            backgroundTask: null);
+                        return Task.CompletedTask;
+                    },
+                    log,
+                    7,
+                    TimeSpan.FromSeconds(1),
+                    lifetimeToken);
+            },
+            () => failureCallbackRan = true,
+            capturedToken);
+
+        Assert.True(initializationCompleted);
+        Assert.True(capturedToken.IsCancellationRequested);
+        Assert.False(failureCallbackRan);
+        Assert.Null(backgroundMaintenance);
+        Assert.Null(log.RetentionDays);
+    }
+
+    [Fact]
+    public async Task ScheduleDeleteExpired_WithDisposedSource_ObservesLateFaultAndCanceledToken()
+    {
+        var lifetime = new CancellationTokenSource();
+        CancellationToken capturedToken = lifetime.Token;
+        var log = new RecordingAuditLog
+        {
+            DeleteExpired = (_, _) => Task.FromException(
+                new IOException(@"Could not delete C:\private\audit.jsonl"))
+        };
+        AppAuditMaintenance.CancelLifetimeWithoutWaiting(lifetime, backgroundTask: null);
+
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
+            log,
+            7,
+            TimeSpan.FromSeconds(1),
+            capturedToken);
+
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(7, log.RetentionDays);
+        Assert.True(log.CleanupToken.IsCancellationRequested);
     }
 
     [Fact]

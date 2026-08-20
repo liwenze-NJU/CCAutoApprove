@@ -21,6 +21,7 @@ public partial class App : System.Windows.Application
 
     protected override async void OnStartup(StartupEventArgs e)
     {
+        CancellationToken appLifetimeToken = appLifetimeCancellation.Token;
         base.OnStartup(e);
         singleInstanceGuard = new SingleInstanceGuard();
         if (!singleInstanceGuard.TryAcquire())
@@ -34,83 +35,98 @@ public partial class App : System.Windows.Application
             return;
         }
 
-        try
-        {
-            var paths = new AppPaths();
-            var settingsStore = new JsonSettingsStore(paths.SettingsPath);
-            PersistentSettings settings = await settingsStore.LoadAsync(CancellationToken.None);
-            var clock = new SystemClock();
-            var directoryService = new WindowsDirectoryService();
-            var runtimeStore = new JsonRuntimeStateStore(paths.RuntimeStatePath);
-            heartbeatService = new HeartbeatService(
-                runtimeStore,
-                clock,
-                new WindowsCurrentProcessInfo(),
-                directoryService,
-                new PeriodicHeartbeatTimer());
+        await AppStartupLifecycle.RunAsync(
+            async lifetimeToken =>
+            {
+                var paths = new AppPaths();
+                var settingsStore = new JsonSettingsStore(paths.SettingsPath);
+                PersistentSettings settings = await settingsStore.LoadAsync(lifetimeToken);
+                lifetimeToken.ThrowIfCancellationRequested();
+                var clock = new SystemClock();
+                var directoryService = new WindowsDirectoryService();
+                var runtimeStore = new JsonRuntimeStateStore(paths.RuntimeStatePath);
+                heartbeatService = new HeartbeatService(
+                    runtimeStore,
+                    clock,
+                    new WindowsCurrentProcessInfo(),
+                    directoryService,
+                    new PeriodicHeartbeatTimer());
 
-            string cliPath = ResolveCliPath();
-            string claudeSettingsPath = ResolveClaudeSettingsPath();
-            var hookManager = new ClaudeHookManager(claudeSettingsPath, cliPath);
-            var doctor = new ClaudeDoctor(
-                claudeSettingsPath,
-                cliPath,
-                paths.BasePath,
-                paths.RuntimeStatePath,
-                settings.SelectedProject);
-            var controller = new AppController(settingsStore, directoryService, doctor, heartbeatService);
-            await controller.InitializeAsync(CancellationToken.None);
+                string cliPath = ResolveCliPath();
+                string claudeSettingsPath = ResolveClaudeSettingsPath();
+                var hookManager = new ClaudeHookManager(claudeSettingsPath, cliPath);
+                var doctor = new ClaudeDoctor(
+                    claudeSettingsPath,
+                    cliPath,
+                    paths.BasePath,
+                    paths.RuntimeStatePath,
+                    settings.SelectedProject);
+                var controller = new AppController(
+                    settingsStore,
+                    directoryService,
+                    doctor,
+                    heartbeatService);
+                await controller.InitializeAsync(lifetimeToken);
+                lifetimeToken.ThrowIfCancellationRequested();
 
-            IAuditLog auditLog = AppAuditMaintenance.CreateLog(paths, settings, clock);
-            retentionMaintenanceTask = await AppAuditMaintenance.InitializeThenScheduleAsync(
-                async () =>
-                {
-                    var status = new StatusViewModel(controller);
-                    var records = new RecordsViewModel(
-                        auditLog,
-                        ConfirmClearRecordsAsync,
-                        settings.AuditDetailLevel);
-                    var settingsViewModel = new SettingsViewModel(
-                        settingsStore,
-                        auditLog,
-                        ConfirmDeleteDetailedLogsAsync,
-                        () => hookManager.InstallAsync(CancellationToken.None),
-                        async () => _ = await doctor.RunAsync(CancellationToken.None),
-                        () => hookManager.UninstallAsync(CancellationToken.None),
-                        new WindowsStartupManager(ResolveAppExecutablePath()));
-                    await records.LoadAsync();
-                    await settingsViewModel.LoadAsync();
-                    status.SetHookHealth(await doctor.IsOperationalAsync(CancellationToken.None));
-                    DateOnly today = DateOnly.FromDateTime(DateTime.Now);
-                    using var countCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                    status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(
-                        today,
-                        TimeZoneInfo.Local,
-                        countCancellation.Token));
-
-                    var mainViewModel = new MainViewModel(status, records, settingsViewModel);
-                    var mainWindow = new MainWindow(mainViewModel);
-                    MainWindow = mainWindow;
-                    trayService = new TrayIconService(controller, mainViewModel, mainWindow);
-                    mainWindow.AttachTray(trayService);
-                    if (ShouldShowMainWindow(e.Args))
+                IAuditLog auditLog = AppAuditMaintenance.CreateLog(paths, settings, clock);
+                retentionMaintenanceTask = await AppAuditMaintenance.InitializeThenScheduleAsync(
+                    async startupToken =>
                     {
-                        mainWindow.Show();
-                    }
-                },
-                auditLog,
-                settings.AuditRetentionDays,
-                appLifetimeCancellation.Token);
-        }
-        catch
-        {
-            MessageBox.Show(
-                StringResources.Get("ApplicationStartFailed"),
-                StringResources.Get("AppName"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
-            Shutdown(1);
-        }
+                        startupToken.ThrowIfCancellationRequested();
+                        var status = new StatusViewModel(controller);
+                        var records = new RecordsViewModel(
+                            auditLog,
+                            ConfirmClearRecordsAsync,
+                            settings.AuditDetailLevel);
+                        var settingsViewModel = new SettingsViewModel(
+                            settingsStore,
+                            auditLog,
+                            ConfirmDeleteDetailedLogsAsync,
+                            () => hookManager.InstallAsync(CancellationToken.None),
+                            async () => _ = await doctor.RunAsync(CancellationToken.None),
+                            () => hookManager.UninstallAsync(CancellationToken.None),
+                            new WindowsStartupManager(ResolveAppExecutablePath()));
+                        await records.LoadAsync();
+                        startupToken.ThrowIfCancellationRequested();
+                        await settingsViewModel.LoadAsync();
+                        startupToken.ThrowIfCancellationRequested();
+                        status.SetHookHealth(await doctor.IsOperationalAsync(startupToken));
+                        startupToken.ThrowIfCancellationRequested();
+                        DateOnly today = DateOnly.FromDateTime(DateTime.Now);
+                        using var countCancellation =
+                            CancellationTokenSource.CreateLinkedTokenSource(startupToken);
+                        countCancellation.CancelAfter(TimeSpan.FromSeconds(10));
+                        status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(
+                            today,
+                            TimeZoneInfo.Local,
+                            countCancellation.Token));
+                        startupToken.ThrowIfCancellationRequested();
+
+                        var mainViewModel = new MainViewModel(status, records, settingsViewModel);
+                        var mainWindow = new MainWindow(mainViewModel);
+                        MainWindow = mainWindow;
+                        trayService = new TrayIconService(controller, mainViewModel, mainWindow);
+                        mainWindow.AttachTray(trayService);
+                        if (ShouldShowMainWindow(e.Args))
+                        {
+                            mainWindow.Show();
+                        }
+                    },
+                    auditLog,
+                    settings.AuditRetentionDays,
+                    lifetimeToken);
+            },
+            () =>
+            {
+                MessageBox.Show(
+                    StringResources.Get("ApplicationStartFailed"),
+                    StringResources.Get("AppName"),
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                Shutdown(1);
+            },
+            appLifetimeToken);
     }
 
     protected override void OnExit(ExitEventArgs e)

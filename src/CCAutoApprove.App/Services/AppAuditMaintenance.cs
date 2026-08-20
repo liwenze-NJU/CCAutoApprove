@@ -15,7 +15,7 @@ internal static class AppAuditMaintenance
         IClock clock) => new JsonLineAuditLog(paths, settings, clock);
 
     internal static Task<Task> InitializeThenScheduleAsync(
-        Func<Task> initializeAsync,
+        Func<CancellationToken, Task> initializeAsync,
         IAuditLog auditLog,
         int retentionDays,
         CancellationToken cancellationToken) =>
@@ -27,14 +27,16 @@ internal static class AppAuditMaintenance
             cancellationToken);
 
     internal static async Task<Task> InitializeThenScheduleAsync(
-        Func<Task> initializeAsync,
+        Func<CancellationToken, Task> initializeAsync,
         IAuditLog auditLog,
         int retentionDays,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(initializeAsync);
-        await initializeAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        await initializeAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         return ScheduleDeleteExpired(
             auditLog,
             retentionDays,
