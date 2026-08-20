@@ -53,6 +53,28 @@ public sealed class WindowsStartupManagerTests
     }
 
     [Fact]
+    public void Disable_WhenValueIsMissing_DoesNotAttemptDeletion()
+    {
+        var registry = new FakeUserRunRegistry();
+        var manager = new WindowsStartupManager(AppPath, registry);
+
+        manager.Disable();
+
+        Assert.Empty(registry.DeleteCalls);
+    }
+
+    [Fact]
+    public void Disable_WhenRegistryAccessFails_PropagatesError()
+    {
+        var registry = new FakeUserRunRegistry { GetException = new IOException("access denied") };
+        var manager = new WindowsStartupManager(AppPath, registry);
+
+        IOException exception = Assert.Throws<IOException>(manager.Disable);
+
+        Assert.Equal("access denied", exception.Message);
+    }
+
+    [Fact]
     public void IsEnabled_WhenValuePointsAtDifferentExecutable_ReturnsFalse()
     {
         var registry = new FakeUserRunRegistry { Values = { [ValueName] = "\"C:\\Old\\CCAutoApprove.App.exe\" --minimized" } };
@@ -68,8 +90,17 @@ public sealed class WindowsStartupManagerTests
         public Dictionary<string, object?> Values { get; } = new(StringComparer.Ordinal);
         public List<(string Name, string Value)> SetCalls { get; } = [];
         public List<string> DeleteCalls { get; } = [];
+        public Exception? GetException { get; init; }
 
-        public object? GetValue(string name) => Values.GetValueOrDefault(name);
+        public object? GetValue(string name)
+        {
+            if (GetException is not null)
+            {
+                throw GetException;
+            }
+
+            return Values.GetValueOrDefault(name);
+        }
 
         public void SetValue(string name, string value)
         {

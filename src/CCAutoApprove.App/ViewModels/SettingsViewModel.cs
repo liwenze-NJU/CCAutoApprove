@@ -49,8 +49,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         InstallHookCommand = CreateOperationCommand(this.installHookAsync);
         DoctorCommand = CreateOperationCommand(this.runDoctorAsync);
         UninstallHookCommand = CreateOperationCommand(this.uninstallHookAsync);
-        ChangeStartupEnabledCommand = new RelayCommand(async parameter =>
-            await ChangeStartupEnabledAsync(parameter is true));
+        ChangeStartupEnabledCommand = new AsyncRelayCommand(
+            parameter => ChangeStartupEnabledAsync(parameter is true),
+            HandleStartupErrorAsync);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -96,7 +97,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public AsyncRelayCommand InstallHookCommand { get; }
     public AsyncRelayCommand DoctorCommand { get; }
     public AsyncRelayCommand UninstallHookCommand { get; }
-    public RelayCommand ChangeStartupEnabledCommand { get; }
+    public AsyncRelayCommand ChangeStartupEnabledCommand { get; }
 
     public async Task LoadAsync()
     {
@@ -128,7 +129,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public async Task ChangeStartupEnabledAsync(bool enabled)
     {
-        if (enabled == StartupEnabled)
+        bool priorEnabled = StartupEnabled;
+        if (enabled == priorEnabled)
         {
             return;
         }
@@ -150,9 +152,55 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             StartupEnabled = enabled;
             OperationMessage = null;
         }
-        catch (Exception exception)
+        catch
         {
-            OperationMessage = exception.Message;
+            RestoreStartupState(priorEnabled);
+            StartupEnabled = ReadStartupState(priorEnabled);
+            OnPropertyChanged(nameof(StartupEnabled));
+            OperationMessage = StringResources.Get("ErrorOperationFailed");
+        }
+    }
+
+    private async Task HandleStartupErrorAsync(Exception exception)
+    {
+        StartupEnabled = ReadStartupState(StartupEnabled);
+        OnPropertyChanged(nameof(StartupEnabled));
+        OperationMessage = StringResources.Get("ErrorOperationFailed");
+        await Task.CompletedTask;
+    }
+
+    private void RestoreStartupState(bool priorEnabled)
+    {
+        try
+        {
+            if (startupManager.IsEnabled() == priorEnabled)
+            {
+                return;
+            }
+
+            if (priorEnabled)
+            {
+                startupManager.Enable();
+            }
+            else
+            {
+                startupManager.Disable();
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private bool ReadStartupState(bool fallback)
+    {
+        try
+        {
+            return startupManager.IsEnabled();
+        }
+        catch
+        {
+            return fallback;
         }
     }
 

@@ -1,5 +1,6 @@
 using CCAutoApprove.App.ViewModels;
 using CCAutoApprove.App;
+using CCAutoApprove.App.Services;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
 
@@ -106,23 +107,106 @@ public sealed class SettingsViewModelTests
             () => Task.FromResult(false),
             startupManager: startupManager);
         await viewModel.LoadAsync();
+        var changedProperties = new List<string?>();
+        viewModel.PropertyChanged += (_, eventArgs) => changedProperties.Add(eventArgs.PropertyName);
 
         await viewModel.ChangeStartupEnabledAsync(true);
 
         Assert.False(viewModel.StartupEnabled);
         Assert.False(settingsStore.Settings.StartWithWindows);
-        Assert.Equal("Registry is unavailable.", viewModel.OperationMessage);
+        Assert.Equal(StringResources.Get("ErrorOperationFailed"), viewModel.OperationMessage);
+        Assert.DoesNotContain("Registry is unavailable.", viewModel.OperationMessage);
+        Assert.Contains(nameof(SettingsViewModel.StartupEnabled), changedProperties);
         Assert.Equal(["enable"], startupManager.Operations);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenEnablePersistenceFails_CompensatesRegistryAndRetainsDisabledState()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings())
+        {
+            SaveException = new IOException("settings write failed")
+        };
+        var startupManager = new FakeStartupManager();
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.False(startupManager.Enabled);
+        Assert.False(viewModel.StartupEnabled);
+        Assert.False(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["enable", "disable"], startupManager.Operations);
+        Assert.Equal(StringResources.Get("ErrorOperationFailed"), viewModel.OperationMessage);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenDisablePersistenceFails_CompensatesRegistryAndRetainsEnabledState()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings(StartWithWindows: true))
+        {
+            SaveException = new IOException("settings write failed")
+        };
+        var startupManager = new FakeStartupManager { Enabled = true };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledAsync(false);
+
+        Assert.True(startupManager.Enabled);
+        Assert.True(viewModel.StartupEnabled);
+        Assert.True(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["disable", "enable"], startupManager.Operations);
+        Assert.Equal(StringResources.Get("ErrorOperationFailed"), viewModel.OperationMessage);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledCommand_WhilePersisting_DisablesSecondClickUntilFirstCompletes()
+    {
+        var settingsStore = new BlockingSettingsStore(new PersistentSettings());
+        var startupManager = new FakeStartupManager();
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        Task firstClick = viewModel.ChangeStartupEnabledCommand.ExecuteAsync(true);
+        await settingsStore.SaveStarted.Task;
+        Task secondClick = viewModel.ChangeStartupEnabledCommand.ExecuteAsync(true);
+
+        Assert.False(viewModel.ChangeStartupEnabledCommand.CanExecute(true));
+        Assert.Equal(["enable"], startupManager.Operations);
+        settingsStore.ReleaseSave.SetResult();
+        await Task.WhenAll(firstClick, secondClick);
+
+        Assert.Equal(["enable"], startupManager.Operations);
+        Assert.True(viewModel.StartupEnabled);
     }
 
     private sealed class FakeSettingsStore(PersistentSettings settings, List<string>? operations = null) : ISettingsStore
     {
         public PersistentSettings Settings { get; private set; } = settings;
+        public Exception? SaveException { get; init; }
 
         public Task<PersistentSettings> LoadAsync(CancellationToken cancellationToken) => Task.FromResult(Settings);
 
         public Task SaveAsync(PersistentSettings settings, CancellationToken cancellationToken)
         {
+            if (SaveException is not null)
+            {
+                throw SaveException;
+            }
+
             operations?.Add("save");
             Settings = settings;
             return Task.CompletedTask;
@@ -159,7 +243,8 @@ public sealed class SettingsViewModelTests
 
         public List<string> Operations { get; }
         public Exception? EnableException { get; init; }
-        public bool Enabled { get; private set; }
+        public Exception? DisableException { get; init; }
+        public bool Enabled { get; set; }
 
         public bool IsEnabled() => Enabled;
 
@@ -177,7 +262,27 @@ public sealed class SettingsViewModelTests
         public void Disable()
         {
             Operations.Add("disable");
+            if (DisableException is not null)
+            {
+                throw DisableException;
+            }
+
             Enabled = false;
+        }
+    }
+
+    private sealed class BlockingSettingsStore(PersistentSettings settings) : ISettingsStore
+    {
+        public TaskCompletionSource SaveStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseSave { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<PersistentSettings> LoadAsync(CancellationToken cancellationToken) => Task.FromResult(settings);
+
+        public async Task SaveAsync(PersistentSettings value, CancellationToken cancellationToken)
+        {
+            SaveStarted.SetResult();
+            await ReleaseSave.Task;
+            settings = value;
         }
     }
 }

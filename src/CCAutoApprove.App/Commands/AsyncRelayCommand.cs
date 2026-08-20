@@ -4,13 +4,21 @@ namespace CCAutoApprove.App.Commands;
 
 public sealed class AsyncRelayCommand : ICommand
 {
-    private readonly Func<Task> execute;
+    private readonly Func<object?, Task> execute;
     private readonly Func<Exception, Task> errorHandler;
     private readonly Func<bool>? canExecute;
     private int isExecuting;
 
     public AsyncRelayCommand(
         Func<Task> execute,
+        Func<Exception, Task> errorHandler,
+        Func<bool>? canExecute = null)
+        : this(_ => execute(), errorHandler, canExecute)
+    {
+    }
+
+    public AsyncRelayCommand(
+        Func<object?, Task> execute,
         Func<Exception, Task> errorHandler,
         Func<bool>? canExecute = null)
     {
@@ -24,11 +32,11 @@ public sealed class AsyncRelayCommand : ICommand
     public bool CanExecute(object? parameter) =>
         Volatile.Read(ref isExecuting) == 0 && (canExecute?.Invoke() ?? true);
 
-    public async void Execute(object? parameter) => await ExecuteAsync();
+    public async void Execute(object? parameter) => await ExecuteAsync(parameter);
 
-    public async Task ExecuteAsync()
+    public async Task ExecuteAsync(object? parameter = null)
     {
-        if (!CanExecute(null) || Interlocked.CompareExchange(ref isExecuting, 1, 0) != 0)
+        if (!CanExecute(parameter) || Interlocked.CompareExchange(ref isExecuting, 1, 0) != 0)
         {
             return;
         }
@@ -36,7 +44,7 @@ public sealed class AsyncRelayCommand : ICommand
         OnCanExecuteChanged();
         try
         {
-            await execute();
+            await execute(parameter);
         }
         catch (Exception exception)
         {
