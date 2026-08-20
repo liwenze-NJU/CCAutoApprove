@@ -15,7 +15,7 @@
                 <TextBlock Text="{DynamicResource DetailedWarning}" TextWrapping="Wrap" />
             </Border>
 
-            <CheckBox Content="{DynamicResource StartupLabel}" IsChecked="{Binding StartupEnabled, Mode=OneWay}"
+            <CheckBox Content="{DynamicResource StartupLabel}" IsChecked="{Binding StartupEnabled, Mode=OneWay}" IsThreeState="True"
                       IsEnabled="{Binding CanChangeStartup}" Command="{Binding ChangeStartupEnabledCommand}"
                       CommandParameter="{Binding IsChecked, RelativeSource={RelativeSource Self}}" Margin="0,4,0,20" />
 

@@ -169,6 +169,81 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenEnablePersistenceRollbackAndReconciliationFail_ExposesUnknownState()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings())
+        {
+            SaveException = new IOException("settings write failed")
+        };
+        var startupManager = new FakeStartupManager
+        {
+            DisableException = new IOException("rollback failed"),
+            ThrowOnIsEnabledCall = 3
+        };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.Null(viewModel.StartupEnabled);
+        Assert.False(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["enable", "disable"], startupManager.Operations);
+        Assert.Equal(StringResources.Get("StartupStateUnknown"), viewModel.OperationMessage);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenDisablePersistenceRollbackAndReconciliationFail_ExposesUnknownState()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings(StartWithWindows: true))
+        {
+            SaveException = new IOException("settings write failed")
+        };
+        var startupManager = new FakeStartupManager
+        {
+            Enabled = true,
+            EnableException = new IOException("rollback failed"),
+            ThrowOnIsEnabledCall = 3
+        };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeStartupEnabledAsync(false);
+
+        Assert.Null(viewModel.StartupEnabled);
+        Assert.True(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["disable", "enable"], startupManager.Operations);
+        Assert.Equal(StringResources.Get("StartupStateUnknown"), viewModel.OperationMessage);
+    }
+
+    [Fact]
+    public async Task ChangeStartupEnabledAsync_WhenUnknownStateAccessRecovers_EnforcesRequestedState()
+    {
+        var settingsStore = new FakeSettingsStore(new PersistentSettings());
+        var startupManager = new FakeStartupManager { ThrowOnIsEnabledCall = 1 };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+
+        await viewModel.LoadAsync();
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.True(viewModel.CanChangeStartup);
+        Assert.True(viewModel.StartupEnabled);
+        Assert.True(settingsStore.Settings.StartWithWindows);
+        Assert.Equal(["enable"], startupManager.Operations);
+    }
+
+    [Fact]
     public async Task ChangeStartupEnabledCommand_WhilePersisting_DisablesSecondClickUntilFirstCompletes()
     {
         var settingsStore = new BlockingSettingsStore(new PersistentSettings());
@@ -244,9 +319,19 @@ public sealed class SettingsViewModelTests
         public List<string> Operations { get; }
         public Exception? EnableException { get; init; }
         public Exception? DisableException { get; init; }
+        public int? ThrowOnIsEnabledCall { get; init; }
         public bool Enabled { get; set; }
+        private int isEnabledCalls;
 
-        public bool IsEnabled() => Enabled;
+        public bool IsEnabled()
+        {
+            if (Interlocked.Increment(ref isEnabledCalls) == ThrowOnIsEnabledCall)
+            {
+                throw new IOException("registry read failed");
+            }
+
+            return Enabled;
+        }
 
         public void Enable()
         {

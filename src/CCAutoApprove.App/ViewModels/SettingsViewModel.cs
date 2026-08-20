@@ -18,7 +18,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly Func<Task> uninstallHookAsync;
     private PersistentSettings settings = new();
     private AuditDetailLevel auditDetailLevel = AuditDetailLevel.PrivacySafe;
-    private bool startupEnabled;
+    private bool? startupEnabled;
     private string? operationMessage;
 
     public SettingsViewModel()
@@ -77,7 +77,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public bool IsDetailed => AuditDetailLevel == AuditDetailLevel.Detailed;
     public bool ShowDetailedWarning => IsDetailed;
 
-    public bool StartupEnabled
+    public bool? StartupEnabled
     {
         get => startupEnabled;
         private set => SetProperty(ref startupEnabled, value);
@@ -103,7 +103,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         settings = await settingsStore.LoadAsync(CancellationToken.None);
         AuditDetailLevel = settings.AuditDetailLevel;
-        StartupEnabled = startupManager.IsEnabled();
+        StartupEnabled = ReadStartupState();
+        if (StartupEnabled is null)
+        {
+            OperationMessage = StringResources.Get("StartupStateUnknown");
+        }
     }
 
     public async Task ChangeAuditDetailLevelAsync(AuditDetailLevel newLevel)
@@ -129,8 +133,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public async Task ChangeStartupEnabledAsync(bool enabled)
     {
-        bool priorEnabled = StartupEnabled;
-        if (enabled == priorEnabled)
+        bool? priorEnabled = StartupEnabled;
+        if (priorEnabled.HasValue && enabled == priorEnabled.Value)
         {
             return;
         }
@@ -155,30 +159,39 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch
         {
             RestoreStartupState(priorEnabled);
-            StartupEnabled = ReadStartupState(priorEnabled);
+            StartupEnabled = ReadStartupState();
             OnPropertyChanged(nameof(StartupEnabled));
-            OperationMessage = StringResources.Get("ErrorOperationFailed");
+            OperationMessage = StartupEnabled is null
+                ? StringResources.Get("StartupStateUnknown")
+                : StringResources.Get("ErrorOperationFailed");
         }
     }
 
     private async Task HandleStartupErrorAsync(Exception exception)
     {
-        StartupEnabled = ReadStartupState(StartupEnabled);
+        StartupEnabled = ReadStartupState();
         OnPropertyChanged(nameof(StartupEnabled));
-        OperationMessage = StringResources.Get("ErrorOperationFailed");
+        OperationMessage = StartupEnabled is null
+            ? StringResources.Get("StartupStateUnknown")
+            : StringResources.Get("ErrorOperationFailed");
         await Task.CompletedTask;
     }
 
-    private void RestoreStartupState(bool priorEnabled)
+    private void RestoreStartupState(bool? priorEnabled)
     {
+        if (!priorEnabled.HasValue)
+        {
+            return;
+        }
+
         try
         {
-            if (startupManager.IsEnabled() == priorEnabled)
+            if (startupManager.IsEnabled() == priorEnabled.Value)
             {
                 return;
             }
 
-            if (priorEnabled)
+            if (priorEnabled.Value)
             {
                 startupManager.Enable();
             }
@@ -192,7 +205,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
     }
 
-    private bool ReadStartupState(bool fallback)
+    private bool? ReadStartupState()
     {
         try
         {
@@ -200,7 +213,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch
         {
-            return fallback;
+            return null;
         }
     }
 
