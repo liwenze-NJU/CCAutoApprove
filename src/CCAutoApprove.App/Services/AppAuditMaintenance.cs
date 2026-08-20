@@ -14,17 +14,45 @@ internal static class AppAuditMaintenance
         PersistentSettings settings,
         IClock clock) => new JsonLineAuditLog(paths, settings, clock);
 
-    internal static Task DeleteExpiredFailSafeAsync(
+    internal static Task<Task> InitializeThenScheduleAsync(
+        Func<Task> initializeAsync,
         IAuditLog auditLog,
         int retentionDays,
         CancellationToken cancellationToken) =>
-        DeleteExpiredFailSafeAsync(
+        InitializeThenScheduleAsync(
+            initializeAsync,
             auditLog,
             retentionDays,
             StartupCleanupTimeout,
             cancellationToken);
 
-    internal static async Task DeleteExpiredFailSafeAsync(
+    internal static async Task<Task> InitializeThenScheduleAsync(
+        Func<Task> initializeAsync,
+        IAuditLog auditLog,
+        int retentionDays,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(initializeAsync);
+        await initializeAsync();
+        return ScheduleDeleteExpired(
+            auditLog,
+            retentionDays,
+            timeout,
+            cancellationToken);
+    }
+
+    internal static Task ScheduleDeleteExpired(
+        IAuditLog auditLog,
+        int retentionDays,
+        CancellationToken cancellationToken) =>
+        ScheduleDeleteExpired(
+            auditLog,
+            retentionDays,
+            StartupCleanupTimeout,
+            cancellationToken);
+
+    internal static Task ScheduleDeleteExpired(
         IAuditLog auditLog,
         int retentionDays,
         TimeSpan timeout,
@@ -36,26 +64,64 @@ internal static class AppAuditMaintenance
             throw new ArgumentOutOfRangeException(nameof(timeout));
         }
 
-        using var cleanupCancellation =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cleanupCancellation.CancelAfter(timeout);
+        Task backgroundTask = Task.Run(async () =>
+        {
+            try
+            {
+                using var cleanupCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cleanupCancellation.CancelAfter(timeout);
+                await auditLog.DeleteExpiredAsync(
+                        retentionDays,
+                        cleanupCancellation.Token)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Background audit maintenance is best-effort and must stay invisible.
+            }
+        }, CancellationToken.None);
+        ObserveFault(backgroundTask);
+        return backgroundTask;
+    }
 
+    internal static void CancelLifetimeWithoutWaiting(
+        CancellationTokenSource lifetimeCancellation,
+        Task? backgroundTask)
+    {
+        ArgumentNullException.ThrowIfNull(lifetimeCancellation);
         try
         {
-            Task cleanup = auditLog.DeleteExpiredAsync(
-                retentionDays,
-                cleanupCancellation.Token);
-            ObserveFault(cleanup);
-            await cleanup.WaitAsync(cleanupCancellation.Token).ConfigureAwait(false);
+            lifetimeCancellation.Cancel();
         }
         catch
         {
-            // Audit maintenance must not prevent the local status UI from starting.
+            // Exit remains fail-safe even if a cancellation callback misbehaves.
         }
+
+        if (backgroundTask is null || backgroundTask.IsCompleted)
+        {
+            ObserveFault(backgroundTask);
+            lifetimeCancellation.Dispose();
+            return;
+        }
+
+        ObserveFault(backgroundTask);
+        _ = backgroundTask.ContinueWith(
+            static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+            lifetimeCancellation,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
-    private static void ObserveFault(Task task)
+    private static void ObserveFault(Task? task)
     {
+        if (task is null)
+        {
+            return;
+        }
+
         _ = task.ContinueWith(
             static completed => _ = completed.Exception,
             CancellationToken.None,

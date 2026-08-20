@@ -12,9 +12,11 @@ public sealed class AppAuditMaintenanceTests
 {
     private static readonly DateTimeOffset FixedUtc =
         new(2026, 8, 20, 8, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions JsonLineOptions =
+        new(JsonDefaults.Options) { WriteIndented = false };
 
     [Fact]
-    public async Task AppStartedDisabled_AfterDetailedHookWrite_SettingsFlowReadsAndClearsRealRecord()
+    public async Task AppStartedDisabled_AfterDetailedRecordAppears_SettingsFlowReadsAndClearsRealRecord()
     {
         using var temp = new TemporaryDirectory();
         var paths = new AppPaths(temp.Path);
@@ -31,11 +33,8 @@ public sealed class AppAuditMaintenanceTests
         await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.Detailed);
 
         PersistentSettings hookSettings = await settingsStore.LoadAsync(CancellationToken.None);
-        var hookLog = new JsonLineAuditLog(paths, hookSettings, clock);
-        await hookLog.WriteAsync(
-            CreateRequest(temp.Path),
-            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow),
-            CancellationToken.None);
+        Assert.Equal(AuditDetailLevel.Detailed, hookSettings.AuditDetailLevel);
+        await WriteDetailedAuditRecordAsync(paths, temp.Path);
         var records = new RecordsViewModel(
             maintenanceLog,
             () => Task.FromResult(true),
@@ -55,22 +54,103 @@ public sealed class AppAuditMaintenanceTests
     }
 
     [Fact]
-    public async Task DeleteExpiredFailSafeAsync_UsesConfiguredRetentionDays()
+    public async Task InitializeThenScheduleAsync_CompletesInitializationBeforeRetentionStarts()
     {
-        var log = new RecordingAuditLog();
+        var initializationEntered = CreateCompletionSource();
+        var allowInitializationToComplete = CreateCompletionSource();
+        var retentionStarted = CreateCompletionSource();
+        var allowRetentionToComplete = CreateCompletionSource();
+        var events = new List<string>();
+        var log = new RecordingAuditLog
+        {
+            DeleteExpired = async (_, _) =>
+            {
+                events.Add("retention-started");
+                retentionStarted.SetResult();
+                await allowRetentionToComplete.Task;
+            }
+        };
 
-        await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
+        Task<Task> startup = AppAuditMaintenance.InitializeThenScheduleAsync(
+            async () =>
+            {
+                events.Add("initialization-started");
+                initializationEntered.SetResult();
+                await allowInitializationToComplete.Task;
+                events.Add("initialization-completed");
+            },
             log,
             23,
             TimeSpan.FromSeconds(1),
             CancellationToken.None);
 
+        await initializationEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(retentionStarted.Task.IsCompleted);
+
+        allowInitializationToComplete.SetResult();
+        Task backgroundMaintenance = await startup.WaitAsync(TimeSpan.FromSeconds(2));
+        await retentionStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(
+            ["initialization-started", "initialization-completed", "retention-started"],
+            events);
         Assert.Equal(23, log.RetentionDays);
-        Assert.False(log.CleanupToken.IsCancellationRequested);
+        Assert.False(backgroundMaintenance.IsCompleted);
+
+        allowRetentionToComplete.SetResult();
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     [Fact]
-    public async Task DeleteExpiredFailSafeAsync_WhenCleanupFails_DoesNotBlockStartupOrExposeFailure()
+    public async Task ScheduleDeleteExpired_WhenCleanupIgnoresCancellation_ReturnsWithoutWaiting()
+    {
+        var retentionStarted = CreateCompletionSource();
+        var allowRetentionToComplete = CreateCompletionSource();
+        var log = new RecordingAuditLog
+        {
+            DeleteExpired = async (_, _) =>
+            {
+                retentionStarted.SetResult();
+                await allowRetentionToComplete.Task;
+            }
+        };
+
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
+            log,
+            7,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        await retentionStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(backgroundMaintenance.IsCompleted);
+
+        allowRetentionToComplete.SetResult();
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task ScheduleDeleteExpired_UsesConfiguredRetentionDaysAndCancelsAtBudget()
+    {
+        var log = new RecordingAuditLog
+        {
+            DeleteExpired = static (_, cancellationToken) =>
+                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+        };
+
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
+            log,
+            23,
+            TimeSpan.FromMilliseconds(25),
+            CancellationToken.None);
+
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(23, log.RetentionDays);
+        Assert.True(log.CleanupToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task ScheduleDeleteExpired_WhenCleanupFails_DoesNotFaultBackgroundTask()
     {
         var log = new RecordingAuditLog
         {
@@ -78,52 +158,99 @@ public sealed class AppAuditMaintenanceTests
                 new IOException(@"Could not delete C:\private\audit.jsonl"))
         };
 
-        await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
             log,
             7,
             TimeSpan.FromSeconds(1),
             CancellationToken.None);
 
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+
         Assert.Equal(7, log.RetentionDays);
     }
 
     [Fact]
-    public async Task DeleteExpiredFailSafeAsync_WhenCleanupExceedsBudget_CancelsAndReturns()
+    public async Task CancelLifetimeWithoutWaiting_CancelsButDoesNotWaitForUncancelableCleanup()
     {
+        var retentionStarted = CreateCompletionSource();
+        var allowRetentionToComplete = CreateCompletionSource();
         var log = new RecordingAuditLog
         {
-            DeleteExpired = static (_, cancellationToken) =>
-                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+            DeleteExpired = async (_, _) =>
+            {
+                retentionStarted.SetResult();
+                await allowRetentionToComplete.Task;
+            }
         };
+        var lifetime = new CancellationTokenSource();
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
+            log,
+            7,
+            TimeSpan.FromSeconds(1),
+            lifetime.Token);
+        await retentionStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
-                log,
-                7,
-                TimeSpan.FromMilliseconds(25),
-                CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+        AppAuditMaintenance.CancelLifetimeWithoutWaiting(lifetime, backgroundMaintenance);
+
+        Assert.True(log.CleanupToken.IsCancellationRequested);
+        Assert.False(backgroundMaintenance.IsCompleted);
+
+        allowRetentionToComplete.SetResult();
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task CancelLifetimeWithoutWaiting_WhenCleanupFaultsLater_ObservesFailure()
+    {
+        var retentionStarted = CreateCompletionSource();
+        var cleanupCompletion = CreateCompletionSource();
+        var log = new RecordingAuditLog
+        {
+            DeleteExpired = (_, _) =>
+            {
+                retentionStarted.SetResult();
+                return cleanupCompletion.Task;
+            }
+        };
+        var lifetime = new CancellationTokenSource();
+        Task backgroundMaintenance = AppAuditMaintenance.ScheduleDeleteExpired(
+            log,
+            7,
+            TimeSpan.FromSeconds(1),
+            lifetime.Token);
+        await retentionStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        AppAuditMaintenance.CancelLifetimeWithoutWaiting(lifetime, backgroundMaintenance);
+        cleanupCompletion.SetException(
+            new IOException(@"Could not delete C:\private\audit.jsonl"));
+
+        await backgroundMaintenance.WaitAsync(TimeSpan.FromSeconds(2));
 
         Assert.True(log.CleanupToken.IsCancellationRequested);
     }
 
-    [Fact]
-    public async Task DeleteExpiredFailSafeAsync_WhenLifecycleIsCanceled_PropagatesCancellationToCleanup()
+    private static TaskCompletionSource CreateCompletionSource() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async Task WriteDetailedAuditRecordAsync(AppPaths paths, string projectPath)
     {
-        var log = new RecordingAuditLog
-        {
-            DeleteExpired = static (_, cancellationToken) =>
-                Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
-        };
-        using var lifecycle = new CancellationTokenSource();
-        lifecycle.Cancel();
-
-        await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
-            log,
-            7,
-            TimeSpan.FromSeconds(1),
-            lifecycle.Token);
-
-        Assert.True(log.CleanupToken.IsCancellationRequested);
+        ApprovalRequest request = CreateRequest(projectPath);
+        var record = new AuditRecord(
+            FixedUtc,
+            request.RequestId,
+            Path.GetFullPath(projectPath),
+            request.ToolName,
+            ApprovalDecisionKind.Allow,
+            DecisionSource.LocalAlwaysAllow,
+            request.SessionId,
+            request.PermissionMode,
+            request.ToolInput,
+            request.PermissionSuggestions);
+        string logsDirectory = Path.Combine(paths.BasePath, "logs");
+        Directory.CreateDirectory(logsDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(logsDirectory, $"audit-{FixedUtc:yyyy-MM-dd}.jsonl"),
+            JsonSerializer.Serialize(record, JsonLineOptions) + Environment.NewLine);
     }
 
     private static ApprovalRequest CreateRequest(string projectPath)

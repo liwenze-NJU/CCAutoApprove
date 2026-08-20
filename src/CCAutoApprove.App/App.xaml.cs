@@ -13,9 +13,11 @@ namespace CCAutoApprove.App;
 
 public partial class App : System.Windows.Application
 {
+    private readonly CancellationTokenSource appLifetimeCancellation = new();
     private SingleInstanceGuard? singleInstanceGuard;
     private TrayIconService? trayService;
     private HeartbeatService? heartbeatService;
+    private Task? retentionMaintenanceTask;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -60,39 +62,45 @@ public partial class App : System.Windows.Application
             await controller.InitializeAsync(CancellationToken.None);
 
             IAuditLog auditLog = AppAuditMaintenance.CreateLog(paths, settings, clock);
-            await AppAuditMaintenance.DeleteExpiredFailSafeAsync(
+            retentionMaintenanceTask = await AppAuditMaintenance.InitializeThenScheduleAsync(
+                async () =>
+                {
+                    var status = new StatusViewModel(controller);
+                    var records = new RecordsViewModel(
+                        auditLog,
+                        ConfirmClearRecordsAsync,
+                        settings.AuditDetailLevel);
+                    var settingsViewModel = new SettingsViewModel(
+                        settingsStore,
+                        auditLog,
+                        ConfirmDeleteDetailedLogsAsync,
+                        () => hookManager.InstallAsync(CancellationToken.None),
+                        async () => _ = await doctor.RunAsync(CancellationToken.None),
+                        () => hookManager.UninstallAsync(CancellationToken.None),
+                        new WindowsStartupManager(ResolveAppExecutablePath()));
+                    await records.LoadAsync();
+                    await settingsViewModel.LoadAsync();
+                    status.SetHookHealth(await doctor.IsOperationalAsync(CancellationToken.None));
+                    DateOnly today = DateOnly.FromDateTime(DateTime.Now);
+                    using var countCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(
+                        today,
+                        TimeZoneInfo.Local,
+                        countCancellation.Token));
+
+                    var mainViewModel = new MainViewModel(status, records, settingsViewModel);
+                    var mainWindow = new MainWindow(mainViewModel);
+                    MainWindow = mainWindow;
+                    trayService = new TrayIconService(controller, mainViewModel, mainWindow);
+                    mainWindow.AttachTray(trayService);
+                    if (ShouldShowMainWindow(e.Args))
+                    {
+                        mainWindow.Show();
+                    }
+                },
                 auditLog,
                 settings.AuditRetentionDays,
-                CancellationToken.None);
-            var status = new StatusViewModel(controller);
-            var records = new RecordsViewModel(auditLog, ConfirmClearRecordsAsync, settings.AuditDetailLevel);
-            var settingsViewModel = new SettingsViewModel(
-                settingsStore,
-                auditLog,
-                ConfirmDeleteDetailedLogsAsync,
-                () => hookManager.InstallAsync(CancellationToken.None),
-                async () => _ = await doctor.RunAsync(CancellationToken.None),
-                () => hookManager.UninstallAsync(CancellationToken.None),
-                new WindowsStartupManager(ResolveAppExecutablePath()));
-            await records.LoadAsync();
-            await settingsViewModel.LoadAsync();
-            status.SetHookHealth(await doctor.IsOperationalAsync(CancellationToken.None));
-            DateOnly today = DateOnly.FromDateTime(DateTime.Now);
-            using var countCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(
-                today,
-                TimeZoneInfo.Local,
-                countCancellation.Token));
-
-            var mainViewModel = new MainViewModel(status, records, settingsViewModel);
-            var mainWindow = new MainWindow(mainViewModel);
-            MainWindow = mainWindow;
-            trayService = new TrayIconService(controller, mainViewModel, mainWindow);
-            mainWindow.AttachTray(trayService);
-            if (ShouldShowMainWindow(e.Args))
-            {
-                mainWindow.Show();
-            }
+                appLifetimeCancellation.Token);
         }
         catch
         {
@@ -107,6 +115,9 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        AppAuditMaintenance.CancelLifetimeWithoutWaiting(
+            appLifetimeCancellation,
+            retentionMaintenanceTask);
         trayService?.Dispose();
         if (heartbeatService is not null)
         {
