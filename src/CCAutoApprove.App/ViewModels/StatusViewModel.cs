@@ -16,6 +16,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private bool isEnabled;
     private string hookHealthText;
     private bool? hookOperational;
+    private bool hookErrorResolvedByLaterHealth;
     private StatusPresentation presentation;
     private int todayApprovalCount;
 
@@ -33,7 +34,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         hookOperational = hookMaintenanceService?.Current.IsOperational;
         string? effectiveControllerError = GetEffectiveControllerErrorCode(
             controller.ErrorCode,
-            hookOperational);
+            hookErrorResolvedByLaterHealth);
         presentation = StatusPresentationMapper.Map(
             controller.IsEnabled,
             effectiveControllerError,
@@ -205,7 +206,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         RunOnCapturedContext(() =>
             ErrorMessage = GetErrorMessage(GetEffectiveControllerErrorCode(
                     controller.ErrorCode,
-                    hookOperational))
+                    hookErrorResolvedByLaterHealth))
                 ?? StringResources.Get("ErrorOperationFailed"));
         return Task.CompletedTask;
     }
@@ -219,9 +220,10 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private void RefreshFromController()
     {
         string? actualControllerError = controller.ErrorCode;
+        hookErrorResolvedByLaterHealth = false;
         string? effectiveControllerError = GetEffectiveControllerErrorCode(
             actualControllerError,
-            hookOperational);
+            hookErrorResolvedByLaterHealth);
         IsEnabled = controller.IsEnabled;
         ErrorMessage = GetErrorMessage(effectiveControllerError);
         if (actualControllerError is null or AppController.HeartbeatWriteFailed)
@@ -236,9 +238,11 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         hookOperational = operational;
         HookHealthText = GetHookHealthText(operational);
         string? actualControllerError = controller.ErrorCode;
+        hookErrorResolvedByLaterHealth = operational == true
+            && actualControllerError == AppController.HookNotOperational;
         string? effectiveControllerError = GetEffectiveControllerErrorCode(
             actualControllerError,
-            operational);
+            hookErrorResolvedByLaterHealth);
         if (actualControllerError == AppController.HookNotOperational
             && (ErrorMessage is null
                 || string.Equals(
@@ -299,8 +303,8 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     private static string? GetEffectiveControllerErrorCode(
         string? errorCode,
-        bool? currentHookOperational) =>
-        currentHookOperational == true && errorCode == AppController.HookNotOperational
+        bool hookErrorResolvedByLaterHealth) =>
+        hookErrorResolvedByLaterHealth && errorCode == AppController.HookNotOperational
             ? null
             : errorCode;
 

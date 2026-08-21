@@ -171,6 +171,29 @@ public sealed class StatusViewModelTests
     }
 
     [Fact]
+    public async Task HookHealthyCache_BeforeHookEnableFailure_DoesNotHideTheNewControllerError()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync(hookOperational: false);
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: true);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance)
+        {
+            SelectedProject = ProjectPath
+        };
+
+        Assert.Equal(StringResources.Get("HookHealthy"), viewModel.HookHealthText);
+        Assert.Equal(StatusVisualState.Paused, viewModel.Presentation.State);
+
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+
+        Assert.Equal(AppController.HookNotOperational, environment.Controller.ErrorCode);
+        Assert.Equal(StatusVisualState.Error, viewModel.Presentation.State);
+        Assert.Equal("异常", viewModel.StatusText);
+        Assert.Equal("!", viewModel.StatusIconGlyph);
+        Assert.Equal(TrayIconKind.Error, viewModel.Presentation.TrayIcon);
+        Assert.Equal(StringResources.Get("ErrorHookNotOperational"), viewModel.ErrorMessage);
+    }
+
+    [Fact]
     public async Task HookHealthRecovery_DoesNotClearAnUnrelatedHeartbeatError()
     {
         await using var environment = await ViewModelEnvironment.CreateAsync();
