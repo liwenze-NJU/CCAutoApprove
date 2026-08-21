@@ -143,6 +143,67 @@ public sealed class StatusViewModelTests
     }
 
     [Fact]
+    public async Task HookHealthRecovery_AfterHookEnableFailure_StopsPresentingTheResolvedControllerError()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync(hookOperational: false);
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: false);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance)
+        {
+            SelectedProject = ProjectPath
+        };
+
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+
+        Assert.Equal(AppController.HookNotOperational, environment.Controller.ErrorCode);
+        Assert.Equal(StatusVisualState.Error, viewModel.Presentation.State);
+        Assert.Equal("异常", viewModel.StatusText);
+        Assert.Equal("!", viewModel.StatusIconGlyph);
+        Assert.Equal(TrayIconKind.Error, viewModel.Presentation.TrayIcon);
+
+        maintenance.Publish(operational: true);
+
+        Assert.Equal(AppController.HookNotOperational, environment.Controller.ErrorCode);
+        Assert.Equal(StatusVisualState.Paused, viewModel.Presentation.State);
+        Assert.Equal("已暂停", viewModel.StatusText);
+        Assert.Equal("Ⅱ", viewModel.StatusIconGlyph);
+        Assert.Equal(TrayIconKind.Paused, viewModel.Presentation.TrayIcon);
+        Assert.Null(viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task HookHealthRecovery_DoesNotClearAnUnrelatedHeartbeatError()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync();
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: true);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance)
+        {
+            SelectedProject = ProjectPath
+        };
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+        var heartbeatFailed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        environment.Controller.StateChanged += (_, _) =>
+        {
+            if (environment.Controller.ErrorCode == AppController.HeartbeatWriteFailed)
+            {
+                heartbeatFailed.TrySetResult();
+            }
+        };
+        environment.RuntimeStore.FailNextWrites = 2;
+
+        await environment.Timer.TickAsync();
+        await heartbeatFailed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        maintenance.Publish(operational: true);
+
+        Assert.Equal(AppController.HeartbeatWriteFailed, environment.Controller.ErrorCode);
+        Assert.Equal(StatusVisualState.Error, viewModel.Presentation.State);
+        Assert.Equal(TrayIconKind.Error, viewModel.Presentation.TrayIcon);
+        Assert.Equal(
+            StringResources.Get("ErrorHeartbeatWriteFailed"),
+            viewModel.ErrorMessage);
+    }
+
+    [Fact]
     public async Task StatusInstallAndDoctorCommands_UseSharedMaintenanceService()
     {
         await using var environment = await ViewModelEnvironment.CreateAsync();

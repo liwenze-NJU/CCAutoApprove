@@ -31,12 +31,15 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         selectedProject = controller.SelectedProject;
         isEnabled = controller.IsEnabled;
         hookOperational = hookMaintenanceService?.Current.IsOperational;
-        presentation = StatusPresentationMapper.Map(
-            controller.IsEnabled,
+        string? effectiveControllerError = GetEffectiveControllerErrorCode(
             controller.ErrorCode,
             hookOperational);
+        presentation = StatusPresentationMapper.Map(
+            controller.IsEnabled,
+            effectiveControllerError,
+            hookOperational);
         hookHealthText = GetHookHealthText(hookOperational);
-        errorMessage = GetErrorMessage(controller.ErrorCode);
+        errorMessage = GetErrorMessage(effectiveControllerError);
         ToggleApprovalCommand = new AsyncRelayCommand(ToggleApprovalAsync, HandleCommandErrorAsync);
         ChooseProjectCommand = new RelayCommand(_ => ChooseProject(), _ => !IsEnabled);
         InstallHookCommand = new AsyncRelayCommand(
@@ -119,9 +122,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     public void SetHookHealth(bool operational)
     {
-        hookOperational = operational;
-        HookHealthText = GetHookHealthText(operational);
-        UpdatePresentation(controller.ErrorCode);
+        ApplyHookHealth(operational);
     }
 
     public void SetTodayApprovalCount(int count)
@@ -202,7 +203,9 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private Task HandleCommandErrorAsync(Exception exception)
     {
         RunOnCapturedContext(() =>
-            ErrorMessage = GetErrorMessage(controller.ErrorCode)
+            ErrorMessage = GetErrorMessage(GetEffectiveControllerErrorCode(
+                    controller.ErrorCode,
+                    hookOperational))
                 ?? StringResources.Get("ErrorOperationFailed"));
         return Task.CompletedTask;
     }
@@ -211,23 +214,42 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         RunOnCapturedContext(RefreshFromController);
 
     private void OnHookHealthChanged(object? sender, HookHealthSnapshot snapshot) =>
-        RunOnCapturedContext(() =>
-        {
-            hookOperational = snapshot.IsOperational;
-            HookHealthText = GetHookHealthText(snapshot.IsOperational);
-            UpdatePresentation(controller.ErrorCode);
-        });
+        RunOnCapturedContext(() => ApplyHookHealth(snapshot.IsOperational));
 
     private void RefreshFromController()
     {
-        string? controllerError = controller.ErrorCode;
+        string? actualControllerError = controller.ErrorCode;
+        string? effectiveControllerError = GetEffectiveControllerErrorCode(
+            actualControllerError,
+            hookOperational);
         IsEnabled = controller.IsEnabled;
-        ErrorMessage = GetErrorMessage(controllerError);
-        if (controllerError is null or AppController.HeartbeatWriteFailed)
+        ErrorMessage = GetErrorMessage(effectiveControllerError);
+        if (actualControllerError is null or AppController.HeartbeatWriteFailed)
         {
             SelectedProject = controller.SelectedProject;
         }
-        UpdatePresentation(controllerError);
+        UpdatePresentation(effectiveControllerError);
+    }
+
+    private void ApplyHookHealth(bool? operational)
+    {
+        hookOperational = operational;
+        HookHealthText = GetHookHealthText(operational);
+        string? actualControllerError = controller.ErrorCode;
+        string? effectiveControllerError = GetEffectiveControllerErrorCode(
+            actualControllerError,
+            operational);
+        if (actualControllerError == AppController.HookNotOperational
+            && (ErrorMessage is null
+                || string.Equals(
+                    ErrorMessage,
+                    GetErrorMessage(AppController.HookNotOperational),
+                    StringComparison.Ordinal)))
+        {
+            ErrorMessage = GetErrorMessage(effectiveControllerError);
+        }
+
+        UpdatePresentation(effectiveControllerError);
     }
 
     private void RunOnCapturedContext(Action action)
@@ -274,6 +296,13 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         AppController.HeartbeatWriteFailed => StringResources.Get("ErrorHeartbeatWriteFailed"),
         _ => StringResources.Get("ErrorOperationFailed")
     };
+
+    private static string? GetEffectiveControllerErrorCode(
+        string? errorCode,
+        bool? currentHookOperational) =>
+        currentHookOperational == true && errorCode == AppController.HookNotOperational
+            ? null
+            : errorCode;
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
