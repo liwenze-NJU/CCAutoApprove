@@ -27,4 +27,4 @@ CCAutoApprove 不会边计算边输出。它会先完成以下工作：
 
 官方 Hook 提供明确的 stdin/stdout 协议和权限决定边界，也让 Claude Code 在没有完整 Allow 对象时恢复自己的正常处理。与模拟键盘、鼠标或终端选择相比，它更容易验证、限制项目范围、设置超时并安全降级。因此，CCAutoApprove 保留官方 Hook，并通过“内存缓冲 + 最后一次完整写入 + 非完整 JSON 不构成 Allow”来把剩余风险压缩到操作系统传输故障这一外部边界。
 
-README 将在后续文档整理任务中链接到本页。
+README 的安全警告已链接本页；返回 [README](../README.md) 可查看安装与使用说明。

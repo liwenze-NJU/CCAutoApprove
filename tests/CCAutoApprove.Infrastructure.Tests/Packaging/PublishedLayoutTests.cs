@@ -46,6 +46,7 @@ public sealed class PublishedLayoutTests
 
         Assert.Contains("AppId={{6B4F8851-B57E-48C8-B922-CEAA7C0AC5AD}", script);
         Assert.Contains("PrivilegesRequired=lowest", script);
+        Assert.Contains("ArchitecturesAllowed=x64compatible", script);
         Assert.Contains("DefaultDirName={localappdata}\\Programs\\CCAutoApprove", script);
         Assert.Contains(
             "Source: \"..\\artifacts\\publish\\win-x64\\app\\*\"; DestDir: \"{app}\\app\"",
@@ -53,9 +54,18 @@ public sealed class PublishedLayoutTests
         Assert.Contains(
             "Source: \"..\\artifacts\\publish\\win-x64\\cli\\*\"; DestDir: \"{app}\\cli\"",
             script);
-        Assert.Contains(
-            "Filename: \"{app}\\cli\\CCAutoApprove.Cli.exe\"; Parameters: \"uninstall\"",
-            script);
+        Assert.DoesNotContain("[UninstallRun]", script, StringComparison.Ordinal);
+        Assert.Contains("function StopInstalledApplication: Boolean;", script);
+        Assert.Contains("{app}\\app\\CCAutoApprove.App.exe", script);
+        Assert.Contains("Get-CimInstance Win32_Process", script);
+        Assert.Contains("$_.ExecutablePath", script);
+        Assert.Contains("Stop-Process", script);
+        Assert.Contains("if not StopInstalledApplication then", script);
+        Assert.Contains("Abort;", script);
+        Assert.Contains("function RunHookCleanup: Boolean;", script);
+        Assert.Contains("Exec(CliPath, 'uninstall'", script);
+        Assert.Contains("ResultCode <> 0", script);
+        Assert.Contains("%USERPROFILE%\\.claude\\settings.json", script);
         Assert.Contains(
             "RegDeleteValue(HKCU, 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', "
             + "'CCAutoApprove')",
@@ -63,12 +73,37 @@ public sealed class PublishedLayoutTests
         Assert.Contains("DeleteUserData := MsgBox(", script);
         Assert.Contains("= IDYES;", script);
         Assert.Contains("if DeleteUserData then", script);
-        Assert.Contains("DelTree(ExpandConstant('{localappdata}\\CCAutoApprove')", script);
+        Assert.Contains("if not DelTree(ExpandConstant('{localappdata}\\CCAutoApprove')", script);
 
-        int removeStartup = script.IndexOf("RegDeleteValue", StringComparison.Ordinal);
-        int deleteFiles = script.IndexOf("usPostUninstall", StringComparison.Ordinal);
-        Assert.True(removeStartup >= 0 && removeStartup < deleteFiles,
-            "The HKCU startup value must be removed before post-uninstall data/file cleanup.");
+        int prepareStart = script.IndexOf("procedure PrepareUninstall;", StringComparison.Ordinal);
+        int prepareEnd = script.IndexOf("procedure CurUninstallStepChanged", StringComparison.Ordinal);
+        Assert.True(prepareStart >= 0 && prepareEnd > prepareStart);
+        string prepare = script[prepareStart..prepareEnd];
+        int stopApp = prepare.IndexOf("StopInstalledApplication", StringComparison.Ordinal);
+        int removeHook = prepare.IndexOf("RunHookCleanup", StringComparison.Ordinal);
+        int removeStartup = prepare.IndexOf("RegDeleteValue", StringComparison.Ordinal);
+        Assert.True(stopApp >= 0 && stopApp < removeHook && removeHook < removeStartup,
+            "Shutdown, Hook cleanup, and startup removal must run in that order before file deletion.");
+
+        int postUninstall = script.IndexOf("CurUninstallStep = usPostUninstall", StringComparison.Ordinal);
+        int dataPrompt = script.IndexOf("DeleteUserData := MsgBox(", StringComparison.Ordinal);
+        int deleteData = script.IndexOf("if not DelTree", StringComparison.Ordinal);
+        Assert.True(postUninstall >= 0 && postUninstall < dataPrompt && dataPrompt < deleteData,
+            "The user-data choice and checked deletion must happen after program-file uninstall.");
+    }
+
+    [Fact]
+    public void KnownLimitations_HasCurrentReadmeBacklinkWithoutFutureWorkPromise()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string content = File.ReadAllText(
+            Path.Combine(repositoryRoot, "docs", "known-limitations.md"));
+
+        Assert.Contains("[README](../README.md)", content, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "README 将在后续文档整理任务中链接到本页。",
+            content,
+            StringComparison.Ordinal);
     }
 
     [Fact]
