@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json.Nodes;
 using CCAutoApprove.Infrastructure.Claude;
+using CCAutoApprove.Infrastructure.Configuration;
 
 namespace CCAutoApprove.Infrastructure.Tests.Claude;
 
@@ -195,6 +197,115 @@ public sealed class ClaudeHookManagerTests
             (string?)root["hooks"]!["PermissionRequest"]![0]!["hooks"]![0]!["command"]);
         Assert.Equal(2, committer.AttemptCount);
         Assert.Single(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
+    [Fact]
+    public async Task SnapshotCommitter_WhenSourceChangesWhileReplacementIsPrepared_DoesNotOverwriteExternalEdit()
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = await WriteSettingsAsync(temp, ExistingSettings);
+        byte[] original = await File.ReadAllBytesAsync(settingsPath);
+        byte[] externalEdit = Encoding.UTF8.GetBytes("{\"externalEdit\":\"preserved\"}");
+        using var operations = new BlockingFirstMoveOperations();
+        var committer = new SnapshotClaudeSettingsCommitter(new AtomicFileWriter(operations));
+
+        Task<bool> commit = committer.TryCommitAsync(
+            settingsPath,
+            original,
+            "{\"replacement\":true}",
+            CancellationToken.None);
+        try
+        {
+            Assert.True(operations.FirstMoveStarted.Wait(TimeSpan.FromSeconds(2)));
+            await File.WriteAllBytesAsync(settingsPath, externalEdit);
+            operations.ReleaseFirstMove.Set();
+
+            bool committed = await commit.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.False(committed);
+            Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath));
+        }
+        finally
+        {
+            operations.ReleaseFirstMove.Set();
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InstallAsync_WhenExternalEditFollowsThisAttemptsWrite_PreservesExternalBytesInsteadOfRollingBack(
+        bool settingsExisted)
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = Path.Combine(temp.Path, "settings.json");
+        if (settingsExisted)
+        {
+            await File.WriteAllTextAsync(settingsPath, ExistingSettings);
+        }
+
+        byte[] externalEdit = Encoding.UTF8.GetBytes("{\"externalEdit\":\"preserved\"}");
+        var committer = new WriteThenPauseAndThrowCommitter();
+        var manager = new ClaudeHookManager(settingsPath, CliPath, committer);
+
+        Task install = manager.InstallAsync(CancellationToken.None);
+        try
+        {
+            await committer.ReplacementWritten.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await File.WriteAllBytesAsync(settingsPath, externalEdit);
+            committer.ReleaseFailure.SetResult();
+
+            IOException exception = await Assert.ThrowsAsync<IOException>(() => install);
+
+            Assert.Equal("post-write failure", exception.Message);
+            Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath));
+        }
+        finally
+        {
+            committer.ReleaseFailure.TrySetResult();
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InstallAsync_WhenNoExternalEditFollowsThisAttemptsWrite_RollsBackOwnedBytes(
+        bool settingsExisted)
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = Path.Combine(temp.Path, "settings.json");
+        byte[]? original = null;
+        if (settingsExisted)
+        {
+            await File.WriteAllTextAsync(settingsPath, ExistingSettings);
+            original = await File.ReadAllBytesAsync(settingsPath);
+        }
+
+        var committer = new WriteThenPauseAndThrowCommitter();
+        var manager = new ClaudeHookManager(settingsPath, CliPath, committer);
+
+        Task install = manager.InstallAsync(CancellationToken.None);
+        try
+        {
+            await committer.ReplacementWritten.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            committer.ReleaseFailure.SetResult();
+
+            IOException exception = await Assert.ThrowsAsync<IOException>(() => install);
+
+            Assert.Equal("post-write failure", exception.Message);
+            if (settingsExisted)
+            {
+                Assert.Equal(original, await File.ReadAllBytesAsync(settingsPath));
+            }
+            else
+            {
+                Assert.False(File.Exists(settingsPath));
+            }
+        }
+        finally
+        {
+            committer.ReleaseFailure.TrySetResult();
+        }
     }
 
     [Fact]
@@ -486,6 +597,54 @@ public sealed class ClaudeHookManagerTests
                 expectedSource,
                 replacement,
                 cancellationToken);
+        }
+    }
+
+    private sealed class WriteThenPauseAndThrowCommitter : IClaudeSettingsCommitter
+    {
+        public TaskCompletionSource ReplacementWritten { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFailure { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<bool> TryCommitAsync(
+            string settingsPath,
+            byte[]? expectedSource,
+            string replacement,
+            CancellationToken cancellationToken)
+        {
+            await File.WriteAllTextAsync(settingsPath, replacement, cancellationToken);
+            ReplacementWritten.SetResult();
+            await ReleaseFailure.Task.WaitAsync(cancellationToken);
+            throw new IOException("post-write failure");
+        }
+    }
+
+    private sealed class BlockingFirstMoveOperations : IAtomicFileOperations, IDisposable
+    {
+        private int moveAttempts;
+
+        public ManualResetEventSlim FirstMoveStarted { get; } = new();
+        public ManualResetEventSlim ReleaseFirstMove { get; } = new();
+
+        public bool Exists(string path) => File.Exists(path);
+        public void Delete(string path) => File.Delete(path);
+
+        public void Move(string sourcePath, string targetPath)
+        {
+            if (Interlocked.Increment(ref moveAttempts) == 1)
+            {
+                FirstMoveStarted.Set();
+                Assert.True(ReleaseFirstMove.Wait(TimeSpan.FromSeconds(2)));
+            }
+
+            File.Move(sourcePath, targetPath, overwrite: true);
+        }
+
+        public void Dispose()
+        {
+            FirstMoveStarted.Dispose();
+            ReleaseFirstMove.Dispose();
         }
     }
 

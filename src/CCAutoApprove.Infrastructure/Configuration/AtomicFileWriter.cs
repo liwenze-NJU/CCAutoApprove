@@ -35,6 +35,15 @@ public sealed class AtomicFileWriter
 
     public async Task WriteAllTextAsync(string targetPath, string contents, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(contents);
+        await WriteAllBytesAsync(targetPath, Encoding.UTF8.GetBytes(contents), cancellationToken);
+    }
+
+    internal async Task WriteAllBytesAsync(
+        string targetPath,
+        ReadOnlyMemory<byte> contents,
+        CancellationToken cancellationToken)
+    {
         await writeLock.WaitAsync(cancellationToken);
         string? tempPath = null;
         Exception? primaryException = null;
@@ -46,11 +55,15 @@ public sealed class AtomicFileWriter
             Directory.CreateDirectory(directory);
             tempPath = Path.Combine(directory, $"{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
 
-            await using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: true))
-            await using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            await using (var stream = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                useAsync: true))
             {
-                await writer.WriteAsync(contents.AsMemory(), cancellationToken);
-                await writer.FlushAsync(cancellationToken);
+                await stream.WriteAsync(contents, cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }
 

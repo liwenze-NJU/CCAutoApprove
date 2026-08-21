@@ -13,6 +13,7 @@ public sealed class ClaudeHookManager
     private readonly string settingsPath;
     private readonly string managedCommand;
     private readonly IClaudeSettingsCommitter committer;
+    private readonly SnapshotClaudeSettingsCommitter rollbackCommitter = new();
     private readonly Semaphore mutationSemaphore;
 
     public ClaudeHookManager(string settingsPath, string cliPath, AtomicFileWriter? writer = null)
@@ -296,6 +297,7 @@ public sealed class ClaudeHookManager
         }
 
         string json = root.ToJsonString(WriteOptions);
+        byte[] attemptSource = Encoding.UTF8.GetBytes(json);
         try
         {
             bool committed = await committer.TryCommitAsync(
@@ -309,8 +311,8 @@ public sealed class ClaudeHookManager
                 return false;
             }
 
-            byte[] writtenSource = await File.ReadAllBytesAsync(settingsPath, cancellationToken);
-            JsonNode? written = JsonNode.Parse(writtenSource);
+            byte[] currentSource = await File.ReadAllBytesAsync(settingsPath, cancellationToken);
+            JsonNode? written = JsonNode.Parse(currentSource);
             if (written is not JsonObject writtenRoot || !JsonNode.DeepEquals(root, writtenRoot))
             {
                 return false;
@@ -322,11 +324,21 @@ public sealed class ClaudeHookManager
         {
             if (backupPath is not null && File.Exists(backupPath))
             {
-                await RestoreBackupAsync(backupPath);
+                byte[] backupSource = await File.ReadAllBytesAsync(
+                    backupPath,
+                    CancellationToken.None);
+                await rollbackCommitter.TryCommitBytesAsync(
+                    settingsPath,
+                    attemptSource,
+                    backupSource,
+                    CancellationToken.None);
             }
-            else if (!snapshot.Existed && File.Exists(settingsPath))
+            else if (!snapshot.Existed)
             {
-                File.Delete(settingsPath);
+                await rollbackCommitter.TryDeleteAsync(
+                    settingsPath,
+                    attemptSource,
+                    CancellationToken.None);
             }
 
             throw;
@@ -520,32 +532,6 @@ public sealed class ClaudeHookManager
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {
             return false;
-        }
-    }
-
-    private async Task RestoreBackupAsync(string backupPath)
-    {
-        string directory = Path.GetDirectoryName(settingsPath)!;
-        string restorePath = Path.Combine(directory, $"{Path.GetFileName(settingsPath)}.{Guid.NewGuid():N}.restore.tmp");
-        try
-        {
-            await using (var source = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                4096, useAsync: true))
-            await using (var destination = new FileStream(restorePath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
-                4096, useAsync: true))
-            {
-                await source.CopyToAsync(destination, CancellationToken.None);
-                await destination.FlushAsync(CancellationToken.None);
-            }
-
-            File.Move(restorePath, settingsPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(restorePath))
-            {
-                File.Delete(restorePath);
-            }
         }
     }
 
