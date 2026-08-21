@@ -48,11 +48,9 @@ public sealed class CliApplication(
         CancellationToken cancellationToken,
         Func<CancellationToken, Task<CliApplication>>? applicationFactory = null)
     {
-        bool isHook = string.Equals(
-            args.FirstOrDefault(),
-            "hook",
-            StringComparison.OrdinalIgnoreCase);
-        applicationFactory ??= token => CreateProductionAsync(isHook, token);
+        string? command = args.FirstOrDefault()?.ToLowerInvariant();
+        bool isHook = string.Equals(command, "hook", StringComparison.Ordinal);
+        applicationFactory ??= token => CreateProductionAsync(command, token);
 
         if (!isHook)
         {
@@ -86,7 +84,7 @@ public sealed class CliApplication(
     }
 
     private static async Task<CliApplication> CreateProductionAsync(
-        bool requireSettings,
+        string? command,
         CancellationToken cancellationToken)
     {
         var paths = new AppPaths();
@@ -99,9 +97,12 @@ public sealed class CliApplication(
             new WindowsProjectMatcher(),
             new AlwaysAllowDecisionProvider());
         var settingsStore = new JsonSettingsStore(paths.SettingsPath);
-        PersistentSettings settings = requireSettings
-            ? await settingsStore.LoadRequiredAsync(cancellationToken)
-            : await settingsStore.LoadAsync(cancellationToken);
+        PersistentSettings settings = command switch
+        {
+            "hook" => await settingsStore.LoadRequiredAsync(cancellationToken),
+            "status" or "uninstall" => new PersistentSettings(),
+            _ => await settingsStore.LoadAsync(cancellationToken)
+        };
         IAuditLog auditLog = settings.AuditDetailLevel == AuditDetailLevel.Disabled
             ? new NullAuditLog()
             : new JsonLineAuditLog(paths, settings, clock);

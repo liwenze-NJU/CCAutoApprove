@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using CCAutoApprove.Cli;
 using CCAutoApprove.Core.Models;
+using CCAutoApprove.Infrastructure.Claude;
 using CCAutoApprove.Infrastructure.Configuration;
 
 namespace CCAutoApprove.Cli.Tests;
@@ -137,14 +138,18 @@ public sealed class HookProcessContractTests
         Assert.Empty(result.StandardError);
     }
 
-    [Fact]
-    public async Task StatusProcess_WhenSettingsAreMissing_RemainsAvailableForRepairCommands()
+    [Theory]
+    [InlineData(SettingsFileState.Missing)]
+    [InlineData(SettingsFileState.Malformed)]
+    [InlineData(SettingsFileState.Unreadable)]
+    public async Task StatusProcess_WhenDecisionSettingsCannotBeLoaded_RemainsAvailableForRepairCommands(
+        SettingsFileState settingsFileState)
     {
         await using var scenario = await ProcessScenario.CreateAsync(
             enabled: true,
             heartbeatAge: TimeSpan.Zero,
             projectMatches: true);
-        await scenario.SetSettingsFileStateAsync(SettingsFileState.Missing);
+        await scenario.SetSettingsFileStateAsync(settingsFileState);
 
         ProcessResult result = await scenario.RunAsync([], "status");
 
@@ -154,6 +159,28 @@ public sealed class HookProcessContractTests
             System.Text.Json.JsonDocument.Parse(result.StandardOutput);
         Assert.False(status.RootElement.GetProperty("hookInstalled").GetBoolean());
         Assert.False(status.RootElement.GetProperty("autoApproveEnabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(SettingsFileState.Malformed)]
+    [InlineData(SettingsFileState.Unreadable)]
+    public async Task UninstallProcess_WhenDecisionSettingsCannotBeLoaded_RemovesTheOwnedHook(
+        SettingsFileState settingsFileState)
+    {
+        await using var scenario = await ProcessScenario.CreateAsync(
+            enabled: true,
+            heartbeatAge: TimeSpan.Zero,
+            projectMatches: true);
+        await scenario.InstallHookAsync();
+        Assert.True(await scenario.IsHookInstalledAsync());
+        await scenario.SetSettingsFileStateAsync(settingsFileState);
+
+        ProcessResult result = await scenario.RunAsync([], "uninstall");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StandardOutput);
+        Assert.Empty(result.StandardError);
+        Assert.False(await scenario.IsHookInstalledAsync());
     }
 
     public enum SettingsFileState
@@ -234,8 +261,7 @@ public sealed class HookProcessContractTests
             byte[] standardInput,
             string arguments = "hook")
         {
-            string assemblyPath = typeof(CliApplication).Assembly.Location;
-            string cliPath = Path.ChangeExtension(assemblyPath, ".exe");
+            string cliPath = GetCliPath();
             Assert.True(File.Exists(cliPath), $"CLI apphost was not found at {cliPath}.");
 
             var startInfo = new ProcessStartInfo
@@ -291,6 +317,12 @@ public sealed class HookProcessContractTests
                 stopwatch.Elapsed);
         }
 
+        public Task InstallHookAsync() =>
+            CreateHookManager().InstallAsync(CancellationToken.None);
+
+        public Task<bool> IsHookInstalledAsync() =>
+            CreateHookManager().IsInstalledAsync(CancellationToken.None);
+
         public async Task SetSettingsFileStateAsync(SettingsFileState state)
         {
             string path = Path.Combine(DataDirectory, "settings.json");
@@ -345,6 +377,15 @@ public sealed class HookProcessContractTests
 
         private static string JsonString(string value) =>
             System.Text.Json.JsonSerializer.Serialize(value);
+
+        private ClaudeHookManager CreateHookManager() =>
+            new(claudeSettingsPath, GetCliPath());
+
+        private static string GetCliPath()
+        {
+            string assemblyPath = typeof(CliApplication).Assembly.Location;
+            return Path.ChangeExtension(assemblyPath, ".exe");
+        }
     }
 
     private sealed record ProcessResult(
