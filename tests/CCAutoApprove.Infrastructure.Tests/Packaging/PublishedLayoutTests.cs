@@ -93,6 +93,37 @@ public sealed class PublishedLayoutTests
     }
 
     [Fact]
+    public void InstallerScript_StringEscapeHelpersMutateMutableResultsWithoutAssigningMatchCounts()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string script = File.ReadAllText(
+                Path.Combine(repositoryRoot, "installer", "CCAutoApprove.iss"))
+            .ReplaceLineEndings("\n");
+
+        Assert.DoesNotContain("Result := StringChangeEx(", script, StringComparison.Ordinal);
+        Assert.Contains(
+            """
+            function EscapePercent(const Value: String): String;
+            begin
+              Result := Value;
+              StringChangeEx(Result, '%', '%%', True);
+            end;
+            """,
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            """
+            function EscapePowerShellSingleQuoted(const Value: String): String;
+            begin
+              Result := Value;
+              StringChangeEx(Result, '''', '''''', True);
+            end;
+            """,
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void KnownLimitations_HasCurrentReadmeBacklinkWithoutFutureWorkPromise()
     {
         string repositoryRoot = FindRepositoryRoot();

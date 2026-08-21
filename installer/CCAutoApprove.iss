@@ -38,9 +38,16 @@ var
   DeleteUserData: Boolean;
   UninstallPrepared: Boolean;
 
+function EscapePercent(const Value: String): String;
+begin
+  Result := Value;
+  StringChangeEx(Result, '%', '%%', True);
+end;
+
 function EscapePowerShellSingleQuoted(const Value: String): String;
 begin
-  Result := StringChangeEx(Value, '''', '''''', True);
+  Result := Value;
+  StringChangeEx(Result, '''', '''''', True);
 end;
 
 function StopInstalledApplication: Boolean;
