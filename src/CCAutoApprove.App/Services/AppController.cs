@@ -126,8 +126,10 @@ public sealed class AppController
                 return false;
             }
 
-            PersistentSettings updatedSettings = settings with { SelectedProject = project };
-            await settingsStore.SaveAsync(updatedSettings, cancellationToken).ConfigureAwait(false);
+            PersistentSettings updatedSettings = await settingsStore.UpdateAsync(
+                    current => current with { SelectedProject = project },
+                    cancellationToken)
+                .ConfigureAwait(false);
             settings = updatedSettings;
             await heartbeatService.StopAsync().ConfigureAwait(false);
             try

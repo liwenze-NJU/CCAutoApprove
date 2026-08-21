@@ -10,6 +10,14 @@ namespace CCAutoApprove.App.Tests.ViewModels;
 
 public sealed class StatusViewModelTests
 {
+    [Fact]
+    public void AsyncRelayCommand_LegacyOverload_NullExecuteThrowsDuringConstruction()
+    {
+        Assert.Throws<ArgumentNullException>(() => new AsyncRelayCommand(
+            (Func<Task>)null!,
+            _ => Task.CompletedTask));
+    }
+
     private const string ProjectPath = @"D:\projects\status";
 
     [Fact]
@@ -108,12 +116,82 @@ public sealed class StatusViewModelTests
     }
 
     [Fact]
+    public async Task HookHealthFaultAndRecovery_UpdateOneSharedStatusAndTrayPresentation()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync();
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: true);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance)
+        {
+            SelectedProject = ProjectPath
+        };
+
+        Assert.Equal(StatusVisualState.Paused, viewModel.Presentation.State);
+        await viewModel.ToggleApprovalCommand.ExecuteAsync();
+        Assert.Equal(StatusVisualState.Running, viewModel.Presentation.State);
+
+        maintenance.Publish(operational: false);
+
+        Assert.Equal(StatusVisualState.Error, viewModel.Presentation.State);
+        Assert.Equal(TrayIconKind.Error, viewModel.Presentation.TrayIcon);
+        Assert.Equal(StringResources.Get("HookUnhealthy"), viewModel.HookHealthText);
+
+        maintenance.Publish(operational: true);
+
+        Assert.Equal(StatusVisualState.Running, viewModel.Presentation.State);
+        Assert.Equal(TrayIconKind.Running, viewModel.Presentation.TrayIcon);
+        Assert.Equal(StringResources.Get("HookHealthy"), viewModel.HookHealthText);
+    }
+
+    [Fact]
+    public async Task StatusInstallAndDoctorCommands_UseSharedMaintenanceService()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync();
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: false);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance);
+
+        await viewModel.InstallHookCommand.ExecuteAsync();
+        await viewModel.DoctorCommand.ExecuteAsync();
+
+        Assert.Equal(1, maintenance.InstallCalls);
+        Assert.Equal(1, maintenance.DoctorCalls);
+        Assert.Equal(StatusVisualState.Paused, viewModel.Presentation.State);
+    }
+
+    [Fact]
+    public async Task RefreshCommand_RefreshesHookHealthAndTodayApprovalCountTogether()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync();
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: false);
+        int countCalls = 0;
+        var viewModel = new StatusViewModel(
+            environment.Controller,
+            maintenance,
+            _ =>
+            {
+                countCalls++;
+                return Task.FromResult(17);
+            });
+
+        await viewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.Equal(1, maintenance.RefreshCalls);
+        Assert.Equal(1, countCalls);
+        Assert.Equal(
+            string.Format(StringResources.Get("TodayApprovalCountFormat"), 17),
+            viewModel.TodayApprovalCountText);
+    }
+
+    [Fact]
     public async Task MainViewModel_ExposesItsThreePageViewModels()
     {
         await using var environment = await ViewModelEnvironment.CreateAsync();
         var status = new StatusViewModel(environment.Controller);
         var records = new RecordsViewModel();
-        var settings = new SettingsViewModel();
+        var settings = new SettingsViewModel(
+            new StatusSettingsStore(new PersistentSettings()),
+            new TestAuditLog(),
+            () => Task.FromResult(false),
+            confirmEnableDetailedAsync: () => Task.FromResult(true));
 
         var main = new MainViewModel(status, records, settings);
 
@@ -128,6 +206,28 @@ public sealed class StatusViewModelTests
         await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.PrivacySafe);
 
         Assert.Equal(AuditDetailLevel.PrivacySafe, records.AuditDetailLevel);
+    }
+
+    private sealed class TestAuditLog : IAuditLog
+    {
+        public Task WriteAsync(
+            ApprovalRequest request,
+            ApprovalDecision decision,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(
+            int maximumCount,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<AuditRecord>>([]);
+
+        public Task<int> CountAllowedAsync(
+            DateTimeOffset startUtcInclusive,
+            DateTimeOffset endUtcExclusive,
+            CancellationToken cancellationToken) => Task.FromResult(0);
+
+        public Task ClearAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 
     private sealed class ViewModelEnvironment(
@@ -178,6 +278,15 @@ public sealed class StatusViewModelTests
             Settings = settings;
             return Task.CompletedTask;
         }
+
+        public async Task<PersistentSettings> UpdateAsync(
+            Func<PersistentSettings, PersistentSettings> update,
+            CancellationToken cancellationToken)
+        {
+            PersistentSettings updated = update(await LoadAsync(cancellationToken));
+            await SaveAsync(updated, cancellationToken);
+            return updated;
+        }
     }
 
     private sealed class ConfigurableDirectoryService(bool exists) : IDirectoryService
@@ -188,6 +297,48 @@ public sealed class StatusViewModelTests
     private sealed class ConfigurableHookHealthService(bool operational) : IHookHealthService
     {
         public Task<bool> IsOperationalAsync(CancellationToken cancellationToken) => Task.FromResult(operational);
+    }
+
+    private sealed class PublishingHookMaintenanceService(bool initialOperational)
+        : IHookMaintenanceService
+    {
+        public event EventHandler<HookHealthSnapshot>? HealthChanged;
+        public HookHealthSnapshot Current { get; private set; } = new(initialOperational, []);
+        public int InstallCalls { get; private set; }
+        public int DoctorCalls { get; private set; }
+        public int RefreshCalls { get; private set; }
+
+        public Task<HookOperationResult> InstallAsync(CancellationToken cancellationToken)
+        {
+            InstallCalls++;
+            Publish(true);
+            return Task.FromResult(new HookOperationResult(HookOperationOutcome.Installed, true, []));
+        }
+
+        public Task<HookOperationResult> DoctorAsync(CancellationToken cancellationToken)
+        {
+            DoctorCalls++;
+            Publish(true);
+            return Task.FromResult(new HookOperationResult(HookOperationOutcome.Healthy, true, []));
+        }
+
+        public Task<HookOperationResult> UninstallAsync(CancellationToken cancellationToken)
+        {
+            Publish(false);
+            return Task.FromResult(new HookOperationResult(HookOperationOutcome.Uninstalled, false, []));
+        }
+
+        public Task<HookHealthSnapshot> RefreshAsync(CancellationToken cancellationToken)
+        {
+            RefreshCalls++;
+            return Task.FromResult(Current);
+        }
+
+        public void Publish(bool operational)
+        {
+            Current = new HookHealthSnapshot(operational, []);
+            HealthChanged?.Invoke(this, Current);
+        }
     }
 }
 

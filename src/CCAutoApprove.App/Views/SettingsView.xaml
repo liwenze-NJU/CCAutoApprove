@@ -28,6 +28,7 @@
                 <Button Content="{DynamicResource UninstallHook}" Command="{Binding UninstallHookCommand}" MinWidth="110" Margin="0,0,0,8" Padding="12,6" />
             </WrapPanel>
             <TextBlock Text="{Binding OperationMessage}" Foreground="Firebrick" Margin="0,8,0,0" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding ApplicationVersionText}" Margin="0,24,0,0" Foreground="DimGray" />
         </StackPanel>
     </ScrollViewer>
 </UserControl>

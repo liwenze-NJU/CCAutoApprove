@@ -2,9 +2,9 @@ using System.Text.Json;
 
 namespace CCAutoApprove.Infrastructure.Claude;
 
-public sealed class ClaudePermissionResponseWriter
+public class ClaudePermissionResponseWriter
 {
-    public async Task WriteAllowAsync(Stream output, CancellationToken cancellationToken)
+    public virtual async Task WriteAllowAsync(Stream output, CancellationToken cancellationToken)
     {
         using var writer = new Utf8JsonWriter(output);
         writer.WriteStartObject();

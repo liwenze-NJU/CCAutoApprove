@@ -130,6 +130,28 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task Hook_WhenDeadlineCancelsAfterPayloadIsBuilt_WritesZeroBytes()
+    {
+        using var input = new MemoryStream(ValidFixtureBytes);
+        using var output = new RecordingWriteStream();
+        using var error = new StringWriter();
+        using var cancellation = new CancellationTokenSource();
+        var responseWriter = new CancelAfterWritingResponseWriter(cancellation);
+        CliApplication app = CreateApp(
+            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow),
+            responseWriter: responseWriter);
+
+        int exitCode = await app.RunAsync(
+            ["hook"], input, output, error, cancellation.Token);
+
+        Assert.Equal(0, exitCode);
+        Assert.True(responseWriter.PayloadWasBuilt);
+        Assert.Equal(0, output.SynchronousWriteCount);
+        Assert.Equal(0, output.Length);
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
     public async Task Hook_WhenAuditBlocksAndFaultsLater_ReturnsAtDeadlineWithoutOutput()
     {
         using var input = new MemoryStream(ValidFixtureBytes);
@@ -264,9 +286,47 @@ public sealed class CliApplicationTests : IDisposable
         Assert.DoesNotContain("TOP_SECRET", status, StringComparison.Ordinal);
         using JsonDocument document = JsonDocument.Parse(status);
         Assert.True(document.RootElement.TryGetProperty("hookInstalled", out _));
+        Assert.True(document.RootElement.TryGetProperty("hookOperational", out _));
         Assert.True(document.RootElement.TryGetProperty("runtimeState", out _));
         Assert.True(document.RootElement.TryGetProperty("autoApproveEnabled", out _));
         Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public async Task Status_RuntimeValidWithoutOperationalHook_ReportsEffectiveApprovalDisabled()
+    {
+        using var output = new MemoryStream();
+        using var error = new StringWriter();
+        CliApplication app = CreateApp(ApprovalDecision.Ask("unused"));
+
+        int exitCode = await app.RunAsync(
+            ["status"], Stream.Null, output, error, CancellationToken.None);
+
+        using JsonDocument document = JsonDocument.Parse(output.ToArray());
+        Assert.Equal(0, exitCode);
+        Assert.False(document.RootElement.GetProperty("hookInstalled").GetBoolean());
+        Assert.False(document.RootElement.GetProperty("hookOperational").GetBoolean());
+        Assert.False(document.RootElement.GetProperty("autoApproveEnabled").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Status_OperationalHookAndValidRuntime_ReportsEffectiveApprovalEnabled()
+    {
+        using var output = new MemoryStream();
+        using var error = new StringWriter();
+        CliApplication app = CreateApp(
+            ApprovalDecision.Ask("unused"),
+            out ClaudeHookManager hookManager);
+        await hookManager.InstallAsync(CancellationToken.None);
+
+        int exitCode = await app.RunAsync(
+            ["status"], Stream.Null, output, error, CancellationToken.None);
+
+        using JsonDocument document = JsonDocument.Parse(output.ToArray());
+        Assert.Equal(0, exitCode);
+        Assert.True(document.RootElement.GetProperty("hookInstalled").GetBoolean());
+        Assert.True(document.RootElement.GetProperty("hookOperational").GetBoolean());
+        Assert.True(document.RootElement.GetProperty("autoApproveEnabled").GetBoolean());
     }
 
     public void Dispose()
@@ -279,15 +339,17 @@ public sealed class CliApplicationTests : IDisposable
 
     private CliApplication CreateApp(
         ApprovalDecision decision,
-        IAuditLog? auditLog = null)
+        IAuditLog? auditLog = null,
+        ClaudePermissionResponseWriter? responseWriter = null)
     {
-        return CreateApp(decision, out _, auditLog);
+        return CreateApp(decision, out _, auditLog, responseWriter);
     }
 
     private CliApplication CreateApp(
         ApprovalDecision decision,
         out ClaudeHookManager hookManager,
-        IAuditLog? auditLog = null)
+        IAuditLog? auditLog = null,
+        ClaudePermissionResponseWriter? responseWriter = null)
     {
         Directory.CreateDirectory(tempDirectory);
         string claudeSettingsPath = Path.Combine(tempDirectory, "claude-settings.json");
@@ -314,14 +376,15 @@ public sealed class CliApplicationTests : IDisposable
             new ClaudePermissionRequestParser(),
             coordinator,
             auditLog ?? new CapturingAuditLog(),
-            new ClaudePermissionResponseWriter(),
+            responseWriter ?? new ClaudePermissionResponseWriter(),
             clock);
         var doctor = new ClaudeDoctor(
             claudeSettingsPath,
             cliPath,
             tempDirectory,
             Path.Combine(tempDirectory, "runtime.json"),
-            null);
+            null,
+            new SupportedClaudeVersionCapabilityProbe());
 
         return new CliApplication(hookCommand, hookManager, stateStore, validator, doctor);
     }
@@ -329,6 +392,12 @@ public sealed class CliApplicationTests : IDisposable
     private sealed class FixedClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
+    }
+
+    private sealed class SupportedClaudeVersionCapabilityProbe : IClaudeVersionCapabilityProbe
+    {
+        public Task<ClaudeVersionCapability> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new ClaudeVersionCapability(true, "2.0.45"));
     }
 
     private sealed class StubRuntimeStateStore(RuntimeState? state) : IRuntimeStateStore
@@ -486,6 +555,21 @@ public sealed class CliApplicationTests : IDisposable
             }
 
             base.Dispose(disposing);
+        }
+    }
+
+    private sealed class CancelAfterWritingResponseWriter(
+        CancellationTokenSource cancellation) : ClaudePermissionResponseWriter
+    {
+        public bool PayloadWasBuilt { get; private set; }
+
+        public override async Task WriteAllowAsync(
+            Stream output,
+            CancellationToken cancellationToken)
+        {
+            await base.WriteAllowAsync(output, cancellationToken);
+            PayloadWasBuilt = true;
+            cancellation.Cancel();
         }
     }
 

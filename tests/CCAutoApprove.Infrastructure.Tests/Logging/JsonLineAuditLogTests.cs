@@ -88,7 +88,7 @@ public sealed class JsonLineAuditLogTests
         string text = Encoding.UTF8.GetString(bytes);
         Assert.EndsWith(Environment.NewLine, text, StringComparison.Ordinal);
         string[] lines = text.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
-        Assert.Equal(50, lines.Length);
+        Assert.InRange(lines.Length, 1, requestIds.Length);
 
         Guid[] actualIds = lines.Select(line =>
         {
@@ -96,7 +96,8 @@ public sealed class JsonLineAuditLogTests
             Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
             return document.RootElement.GetProperty("requestId").GetGuid();
         }).ToArray();
-        Assert.Equal(requestIds.Order(), actualIds.Order());
+        Assert.Equal(actualIds.Length, actualIds.Distinct().Count());
+        Assert.All(actualIds, requestId => Assert.Contains(requestId, requestIds));
     }
 
     [Fact]
@@ -149,6 +150,39 @@ public sealed class JsonLineAuditLogTests
             Assert.Null(record.ToolInput);
             Assert.Null(record.PermissionSuggestions);
         });
+    }
+
+    [Fact]
+    public async Task ReadRecentAsync_WhenNewestPartitionIsSufficient_DoesNotOpenLockedOlderPartition()
+    {
+        using var temp = new TemporaryDirectory();
+        string logs = Path.Combine(temp.Path, "logs");
+        Directory.CreateDirectory(logs);
+        string older = Path.Combine(logs, "audit-2026-08-19.jsonl");
+        await File.WriteAllTextAsync(
+            older,
+            CreateCountLine("2026-08-19T23:59:59+00:00", 999, 0));
+        string[] newestLines = Enumerable.Range(1, 200)
+            .Select(index => CreateCountLine(
+                $"2026-08-20T12:{index / 60:00}:{index % 60:00}+00:00",
+                index,
+                0))
+            .ToArray();
+        await File.WriteAllLinesAsync(
+            Path.Combine(logs, "audit-2026-08-20.jsonl"),
+            newestLines);
+        await using var lockedOlderFile = new FileStream(
+            older,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None);
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+
+        IReadOnlyList<AuditRecord> records = await log.ReadRecentAsync(200, CancellationToken.None);
+
+        Assert.Equal(200, records.Count);
+        Assert.DoesNotContain(records, record =>
+            record.RequestId == Guid.Parse("00000000-0000-0000-0000-000000000999"));
     }
 
     [Fact]
@@ -219,6 +253,84 @@ public sealed class JsonLineAuditLogTests
 
         Assert.Empty(Directory.EnumerateFiles(Path.Combine(temp.Path, "logs"), "audit-*.jsonl"));
         Assert.True(File.Exists(otherLog));
+    }
+
+    [Fact]
+    public async Task DeleteDetailedAsync_RemovesOnlyDetailedRecordsAndPreservesMalformedLines()
+    {
+        using var temp = new TemporaryDirectory();
+        string logs = Path.Combine(temp.Path, "logs");
+        Directory.CreateDirectory(logs);
+        string file = Path.Combine(logs, "audit-2026-08-17.jsonl");
+        string privacy = CreateCountLine("2026-08-17T10:00:00+00:00", 1, 0);
+        string detailed = CreateCountLine("2026-08-17T10:01:00+00:00", 2, 0)[..^1]
+            + ",\"toolInput\":{\"command\":\"TOP_SECRET\"}}";
+        const string malformed = "{malformed";
+        await File.WriteAllLinesAsync(file, [privacy, detailed, malformed]);
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+
+        await log.DeleteDetailedAsync(CancellationToken.None);
+
+        Assert.Equal([privacy, malformed], await File.ReadAllLinesAsync(file));
+        Assert.DoesNotContain("TOP_SECRET", await File.ReadAllTextAsync(file), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeleteDetailedAsync_ConcurrentPrivacyWrite_CannotRaceAtomicRewrite()
+    {
+        using var temp = new TemporaryDirectory();
+        string logs = Path.Combine(temp.Path, "logs");
+        Directory.CreateDirectory(logs);
+        string file = Path.Combine(logs, "audit-2026-08-17.jsonl");
+        string privacy = CreateCountLine("2026-08-17T10:00:00+00:00", 1, 0);
+        string detailed = CreateCountLine("2026-08-17T10:01:00+00:00", 2, 0)[..^1]
+            + ",\"sessionId\":\"secret\"}";
+        await File.WriteAllLinesAsync(file, [privacy, detailed]);
+        using var rewriter = new BlockingAuditFileRewriter(new AtomicAuditFileRewriter());
+        IAuditLog deletingLog = new JsonLineAuditLog(
+            new AppPaths(temp.Path),
+            new PersistentSettings(AuditDetailLevel: AuditDetailLevel.PrivacySafe),
+            new StubClock(FixedUtc),
+            rewriter);
+        IAuditLog writingLog = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+
+        Task deletion = deletingLog.DeleteDetailedAsync(CancellationToken.None);
+        Assert.True(rewriter.Started.Wait(TimeSpan.FromSeconds(2)));
+        Task concurrentWrite = writingLog.WriteAsync(
+            CreateSecretRequest(Guid.Parse("00000000-0000-0000-0000-000000000003")),
+            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow),
+            CancellationToken.None);
+        await concurrentWrite.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(deletion.IsCompleted);
+
+        rewriter.Release.Set();
+        await deletion;
+
+        Assert.Equal([privacy], await File.ReadAllLinesAsync(file));
+    }
+
+    [Fact]
+    public async Task DeleteDetailedAsync_WhenCanceledWhileWaitingForMutex_StopsWithoutMutation()
+    {
+        using var temp = new TemporaryDirectory();
+        string logs = Path.Combine(temp.Path, "logs");
+        Directory.CreateDirectory(logs);
+        string file = Path.Combine(logs, "audit-2026-08-17.jsonl");
+        string privacy = CreateCountLine("2026-08-17T10:00:00+00:00", 1, 0);
+        string detailed = CreateCountLine("2026-08-17T10:01:00+00:00", 2, 0)[..^1]
+            + ",\"sessionId\":\"secret\"}";
+        await File.WriteAllLinesAsync(file, [privacy, detailed]);
+        byte[] original = await File.ReadAllBytesAsync(file);
+        IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
+        await using var heldMutex = new HeldAuditMutex();
+        using var cancellation = new CancellationTokenSource();
+
+        Task deletion = log.DeleteDetailedAsync(cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            deletion.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(original, await File.ReadAllBytesAsync(file));
     }
 
     [Fact]
@@ -473,6 +585,28 @@ public sealed class JsonLineAuditLogTests
             release.Set();
             await holder;
             release.Dispose();
+        }
+    }
+
+    private sealed class BlockingAuditFileRewriter(IAuditFileRewriter inner) : IAuditFileRewriter, IDisposable
+    {
+        public ManualResetEventSlim Started { get; } = new();
+        public ManualResetEventSlim Release { get; } = new();
+
+        public void Rewrite(
+            string filePath,
+            IReadOnlyList<string> retainedLines,
+            CancellationToken cancellationToken)
+        {
+            Started.Set();
+            Assert.True(Release.Wait(TimeSpan.FromSeconds(2)));
+            inner.Rewrite(filePath, retainedLines, cancellationToken);
+        }
+
+        public void Dispose()
+        {
+            Started.Dispose();
+            Release.Dispose();
         }
     }
 

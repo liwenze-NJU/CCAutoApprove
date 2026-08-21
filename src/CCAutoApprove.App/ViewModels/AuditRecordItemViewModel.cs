@@ -13,6 +13,7 @@ public sealed class AuditRecordItemViewModel
     }
 
     public DateTimeOffset TimeUtc => record.TimeUtc;
+    public string Project => record.Project;
     public string Tool => record.Tool;
     public string? SessionId => record.SessionId;
     public string? PermissionMode => record.PermissionMode;

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CCAutoApprove.App.Services;
 using CCAutoApprove.App.ViewModels;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
@@ -20,6 +21,51 @@ public sealed class RecordsViewModelTests
         Assert.Equal(
             new DateTimeOffset(2026, 8, 20, 0, 0, 0, TimeSpan.Zero).AddMinutes(249),
             viewModel.Records[0].TimeUtc);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ForwardsStartupLifecycleCancellation()
+    {
+        var auditLog = new FakeAuditLog([]);
+        var viewModel = new RecordsViewModel(auditLog, () => Task.FromResult(true));
+        using var cancellation = new CancellationTokenSource();
+
+        await viewModel.LoadAsync(cancellation.Token);
+
+        Assert.Equal(cancellation.Token, auditLog.LastReadCancellationToken);
+    }
+
+    [Fact]
+    public async Task LoadAsync_RefreshesTodayCountConsumerAfterRecords()
+    {
+        int refreshCount = 0;
+        var viewModel = new RecordsViewModel(
+            new FakeAuditLog(CreateRecords(1)),
+            () => Task.FromResult(false),
+            afterRefreshAsync: _ =>
+            {
+                refreshCount++;
+                return Task.CompletedTask;
+            });
+
+        await viewModel.LoadAsync();
+
+        Assert.Equal(1, refreshCount);
+    }
+
+    [Fact]
+    public async Task LoadAsync_WhenAuditReadFails_ShowsLocalizedErrorWithoutInternalMessage()
+    {
+        var auditLog = new FakeAuditLog([])
+        {
+            ReadException = new IOException(@"private path D:\secret\audit.jsonl")
+        };
+        var viewModel = new RecordsViewModel(auditLog, () => Task.FromResult(false));
+
+        await viewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.Equal(StringResources.Get("ErrorRecordsOperationFailed"), viewModel.ErrorMessage);
+        Assert.DoesNotContain("secret", viewModel.ErrorMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -152,6 +198,24 @@ public sealed class RecordsViewModelTests
         Assert.NotEqual(source.ToString(), item.SourceText);
     }
 
+    [Fact]
+    public void AuditRecordItemViewModel_ExposesProjectAndRecordsExposeLocalizedLoggingLevel()
+    {
+        AuditRecord record = CreateRecord(1, detailed: false);
+        var item = new AuditRecordItemViewModel(record);
+        var viewModel = new RecordsViewModel(
+            new FakeAuditLog([record]),
+            () => Task.FromResult(false),
+            AuditDetailLevel.PrivacySafe);
+
+        Assert.Equal(record.Project, item.Project);
+        Assert.Equal(StringResources.Get("AuditPrivacySafe"), viewModel.AuditDetailLevelText);
+
+        viewModel.SetAuditDetailLevel(AuditDetailLevel.Disabled);
+
+        Assert.Equal(StringResources.Get("AuditDisabled"), viewModel.AuditDetailLevelText);
+    }
+
     private static IReadOnlyList<AuditRecord> CreateRecords(int count) =>
         Enumerable.Range(0, count).Select(index => CreateRecord(index, detailed: false)).ToArray();
 
@@ -199,14 +263,21 @@ public sealed class RecordsViewModelTests
         public DateTimeOffset? LastCountStartUtc { get; private set; }
         public DateTimeOffset? LastCountEndUtc { get; private set; }
         public CancellationToken LastCountCancellationToken { get; private set; }
+        public CancellationToken LastReadCancellationToken { get; private set; }
+        public Exception? ReadException { get; init; }
 
         public Task WriteAsync(ApprovalRequest request, ApprovalDecision decision, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
         public Task<IReadOnlyList<AuditRecord>> ReadRecentAsync(int maximumCount, CancellationToken cancellationToken)
         {
+            if (ReadException is not null)
+            {
+                throw ReadException;
+            }
             ReadRecentCalled = true;
             LastMaximumCount = maximumCount;
+            LastReadCancellationToken = cancellationToken;
             IReadOnlyList<AuditRecord> result = records
                 .OrderByDescending(record => record.TimeUtc)
                 .Take(maximumCount)

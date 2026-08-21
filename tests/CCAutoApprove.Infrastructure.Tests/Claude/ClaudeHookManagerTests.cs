@@ -174,6 +174,54 @@ public sealed class ClaudeHookManagerTests
     }
 
     [Fact]
+    public async Task InstallAsync_WhenSettingsChangeBeforeCommit_RetriesMergeAndPreservesConcurrentEdit()
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = await WriteSettingsAsync(temp, ExistingSettings);
+        var committer = new BlockingFirstCommitter(new SnapshotClaudeSettingsCommitter());
+        var manager = new ClaudeHookManager(settingsPath, CliPath, committer);
+
+        Task install = manager.InstallAsync(CancellationToken.None);
+        await committer.FirstAttemptStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        JsonObject concurrent = (JsonObject)JsonNode.Parse(ExistingSettings)!;
+        concurrent["concurrentEdit"] = "preserved";
+        await File.WriteAllTextAsync(settingsPath, concurrent.ToJsonString());
+        committer.ReleaseFirstAttempt.SetResult();
+        await install;
+
+        JsonObject root = (JsonObject)JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))!;
+        Assert.Equal("preserved", (string?)root["concurrentEdit"]);
+        Assert.Equal(ManagedCommand,
+            (string?)root["hooks"]!["PermissionRequest"]![0]!["hooks"]![0]!["command"]);
+        Assert.Equal(2, committer.AttemptCount);
+        Assert.Single(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
+    [Fact]
+    public async Task InstallAsync_ConcurrentManagers_SerializeOneMergedCommit()
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = await WriteSettingsAsync(temp, ExistingSettings);
+        var committer = new BlockingFirstCommitter(new SnapshotClaudeSettingsCommitter());
+        var firstManager = new ClaudeHookManager(settingsPath, CliPath, committer);
+        var secondManager = new ClaudeHookManager(settingsPath, CliPath);
+
+        Task firstInstall = firstManager.InstallAsync(CancellationToken.None);
+        await committer.FirstAttemptStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task secondInstall = secondManager.InstallAsync(CancellationToken.None);
+        Assert.False(secondInstall.IsCompleted);
+
+        committer.ReleaseFirstAttempt.SetResult();
+        await Task.WhenAll(firstInstall, secondInstall);
+
+        JsonArray wrappers = JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))!
+            ["hooks"]!["PermissionRequest"]!.AsArray();
+        Assert.Single(wrappers);
+        Assert.Equal(ManagedCommand, (string?)wrappers[0]!["hooks"]![0]!["command"]);
+        Assert.Single(Directory.EnumerateFiles(temp.Path, "settings.json.ccautoapprove-backup-*"));
+    }
+
+    [Fact]
     public async Task InstallAsync_WhenSettingsMissing_CreatesSettingsWithoutBackup()
     {
         using var temp = new TemporaryDirectory();
@@ -269,6 +317,40 @@ public sealed class ClaudeHookManagerTests
         Assert.Equal("", (string?)wrappers[1]!["matcher"]);
         Assert.Equal(ManagedCommand, (string?)wrappers[1]!["hooks"]![0]!["command"]);
         Assert.True(await manager.IsInstalledAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task InstallAndUninstall_UnrelatedWrapperWithoutMatcher_IsAcceptedAndPreserved()
+    {
+        using var temp = new TemporaryDirectory();
+        const string settings = """
+            {
+              "hooks": {
+                "PermissionRequest": [
+                  {
+                    "hooks": [
+                      { "type": "command", "command": "C:\\tools\\user-approval.exe" }
+                    ]
+                  }
+                ]
+              },
+              "futureSetting": { "preserve": true }
+            }
+            """;
+        string settingsPath = await WriteSettingsAsync(temp, settings);
+        var manager = new ClaudeHookManager(settingsPath, CliPath);
+
+        await manager.InstallAsync(CancellationToken.None);
+        Assert.True(await manager.IsInstalledAsync(CancellationToken.None));
+        await manager.UninstallAsync(CancellationToken.None);
+
+        JsonObject root = (JsonObject)JsonNode.Parse(await File.ReadAllTextAsync(settingsPath))!;
+        JsonObject userWrapper = (JsonObject)root["hooks"]!["PermissionRequest"]![0]!;
+        Assert.False(userWrapper.ContainsKey("matcher"));
+        Assert.Equal("C:\\tools\\user-approval.exe",
+            (string?)userWrapper["hooks"]![0]!["command"]);
+        Assert.True((bool)root["futureSetting"]!["preserve"]!);
+        Assert.False(await manager.IsInstalledAsync(CancellationToken.None));
     }
 
     [Fact]
@@ -374,6 +456,37 @@ public sealed class ClaudeHookManagerTests
         string path = Path.Combine(temp.Path, "settings.json");
         await File.WriteAllTextAsync(path, contents);
         return path;
+    }
+
+    private sealed class BlockingFirstCommitter(IClaudeSettingsCommitter inner)
+        : IClaudeSettingsCommitter
+    {
+        private int attemptCount;
+
+        public TaskCompletionSource FirstAttemptStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirstAttempt { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int AttemptCount => Volatile.Read(ref attemptCount);
+
+        public async Task<bool> TryCommitAsync(
+            string settingsPath,
+            byte[]? expectedSource,
+            string replacement,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref attemptCount) == 1)
+            {
+                FirstAttemptStarted.SetResult();
+                await ReleaseFirstAttempt.Task.WaitAsync(cancellationToken);
+            }
+
+            return await inner.TryCommitAsync(
+                settingsPath,
+                expectedSource,
+                replacement,
+                cancellationToken);
+        }
     }
 
     private sealed class TemporaryDirectory : IDisposable

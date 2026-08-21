@@ -9,7 +9,13 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <DockPanel Margin="0,0,0,12">
-            <TextBlock Text="{DynamicResource RecordsTitle}" FontSize="24" FontWeight="SemiBold" />
+            <StackPanel>
+                <TextBlock Text="{DynamicResource RecordsTitle}" FontSize="24" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <TextBlock Text="{DynamicResource CurrentAuditLevelLabel}" FontWeight="SemiBold" Margin="0,0,6,0" />
+                    <TextBlock Text="{Binding AuditDetailLevelText}" />
+                </StackPanel>
+            </StackPanel>
             <WrapPanel DockPanel.Dock="Right" HorizontalAlignment="Right">
                 <Button Content="{DynamicResource RefreshRecords}" Command="{Binding RefreshCommand}" Margin="8,0,0,0" Padding="12,6" />
                 <Button Content="{DynamicResource ClearRecords}" Command="{Binding ClearCommand}" Margin="8,0,0,0" Padding="12,6" />
@@ -19,6 +25,7 @@
                   AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="{DynamicResource ColumnTime}" Binding="{Binding TimeUtc, StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="170" />
+                <DataGridTextColumn Header="{DynamicResource ColumnProject}" Binding="{Binding Project}" Width="2*" MinWidth="140" />
                 <DataGridTextColumn Header="{DynamicResource ColumnTool}" Binding="{Binding Tool}" Width="*" MinWidth="100" />
                 <DataGridTextColumn Header="{DynamicResource ColumnDecision}" Binding="{Binding DecisionText}" Width="100" />
                 <DataGridTextColumn Header="{DynamicResource ColumnSource}" Binding="{Binding SourceText}" Width="140" />

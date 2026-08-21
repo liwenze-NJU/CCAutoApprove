@@ -48,11 +48,11 @@ public sealed class CliApplication(
         CancellationToken cancellationToken,
         Func<CancellationToken, Task<CliApplication>>? applicationFactory = null)
     {
-        applicationFactory ??= CreateProductionAsync;
         bool isHook = string.Equals(
             args.FirstOrDefault(),
             "hook",
             StringComparison.OrdinalIgnoreCase);
+        applicationFactory ??= token => CreateProductionAsync(isHook, token);
 
         if (!isHook)
         {
@@ -85,7 +85,9 @@ public sealed class CliApplication(
         }
     }
 
-    private static async Task<CliApplication> CreateProductionAsync(CancellationToken cancellationToken)
+    private static async Task<CliApplication> CreateProductionAsync(
+        bool requireSettings,
+        CancellationToken cancellationToken)
     {
         var paths = new AppPaths();
         var clock = new SystemClock();
@@ -96,9 +98,10 @@ public sealed class CliApplication(
             stateValidator,
             new WindowsProjectMatcher(),
             new AlwaysAllowDecisionProvider());
-        PersistentSettings settings = await LoadSettingsOrPrivacySafeDefaultAsync(
-            paths.SettingsPath,
-            cancellationToken);
+        var settingsStore = new JsonSettingsStore(paths.SettingsPath);
+        PersistentSettings settings = requireSettings
+            ? await settingsStore.LoadRequiredAsync(cancellationToken)
+            : await settingsStore.LoadAsync(cancellationToken);
         IAuditLog auditLog = settings.AuditDetailLevel == AuditDetailLevel.Disabled
             ? new NullAuditLog()
             : new JsonLineAuditLog(paths, settings, clock);
@@ -130,6 +133,8 @@ public sealed class CliApplication(
     private async Task StatusAsync(Stream output, CancellationToken cancellationToken)
     {
         bool hookInstalled = await hookManager.IsInstalledAsync(cancellationToken);
+        bool hookOperational = hookInstalled
+            && await doctor.IsOperationalAsync(cancellationToken);
         RuntimeState? state = await runtimeStateStore.LoadAsync(cancellationToken);
         RuntimeValidationResult? validation = state is null
             ? null
@@ -138,10 +143,13 @@ public sealed class CliApplication(
         using var writer = new Utf8JsonWriter(output);
         writer.WriteStartObject();
         writer.WriteBoolean("hookInstalled", hookInstalled);
+        writer.WriteBoolean("hookOperational", hookOperational);
         writer.WriteString(
             "runtimeState",
             state is null ? "Missing" : validation!.IsValid ? "Valid" : validation.ErrorCode);
-        writer.WriteBoolean("autoApproveEnabled", state is not null && validation!.IsValid);
+        writer.WriteBoolean(
+            "autoApproveEnabled",
+            hookOperational && state is not null && validation!.IsValid);
         writer.WriteEndObject();
         await writer.FlushAsync(cancellationToken);
     }
@@ -186,24 +194,6 @@ public sealed class CliApplication(
     {
         error.WriteLine("Usage: CCAutoApprove.Cli <hook|install|uninstall|status|doctor>");
         return 2;
-    }
-
-    private static async Task<PersistentSettings> LoadSettingsOrPrivacySafeDefaultAsync(
-        string settingsPath,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await new JsonSettingsStore(settingsPath).LoadAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch
-        {
-            return new PersistentSettings(AuditDetailLevel: AuditDetailLevel.PrivacySafe);
-        }
     }
 
     private static string ResolveClaudeSettingsPath()

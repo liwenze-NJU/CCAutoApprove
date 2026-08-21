@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using CCAutoApprove.App.Commands;
+using CCAutoApprove.App.Services;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
 
@@ -12,6 +13,7 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
     private const int MaximumRecordCount = 200;
     private readonly IAuditLog auditLog;
     private readonly Func<Task<bool>> confirmClearAsync;
+    private readonly Func<CancellationToken, Task>? afterRefreshAsync;
     private AuditDetailLevel auditDetailLevel;
     private AuditRecordItemViewModel? selectedRecord;
     private string? errorMessage;
@@ -24,11 +26,13 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
     public RecordsViewModel(
         IAuditLog auditLog,
         Func<Task<bool>> confirmClearAsync,
-        AuditDetailLevel auditDetailLevel = AuditDetailLevel.PrivacySafe)
+        AuditDetailLevel auditDetailLevel = AuditDetailLevel.PrivacySafe,
+        Func<CancellationToken, Task>? afterRefreshAsync = null)
     {
         this.auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         this.confirmClearAsync = confirmClearAsync ?? throw new ArgumentNullException(nameof(confirmClearAsync));
         this.auditDetailLevel = auditDetailLevel;
+        this.afterRefreshAsync = afterRefreshAsync;
         ClearCommand = new AsyncRelayCommand(ClearAsync, HandleErrorAsync);
         RefreshCommand = new AsyncRelayCommand(LoadAsync, HandleErrorAsync);
     }
@@ -37,6 +41,13 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
     public ObservableCollection<AuditRecordItemViewModel> Records { get; } = [];
     public AuditDetailLevel AuditDetailLevel => auditDetailLevel;
+    public string AuditDetailLevelText => StringResources.Get(auditDetailLevel switch
+    {
+        AuditDetailLevel.Disabled => "AuditDisabled",
+        AuditDetailLevel.PrivacySafe => "AuditPrivacySafe",
+        AuditDetailLevel.Detailed => "AuditDetailed",
+        _ => "ValueUnknown"
+    });
 
     public AuditRecordItemViewModel? SelectedRecord
     {
@@ -78,6 +89,7 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
         auditDetailLevel = detailLevel;
         OnPropertyChanged(nameof(AuditDetailLevel));
+        OnPropertyChanged(nameof(AuditDetailLevelText));
         OnPropertyChanged(nameof(ShowDetails));
         OnPropertyChanged(nameof(SelectedSessionId));
         OnPropertyChanged(nameof(SelectedPermissionMode));
@@ -85,12 +97,16 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(SelectedPermissionSuggestions));
     }
 
-    public async Task LoadAsync()
+    public Task LoadAsync() => LoadAsync(CancellationToken.None);
+
+    public async Task LoadAsync(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ErrorMessage = null;
         IReadOnlyList<AuditRecord> recent = await auditLog.ReadRecentAsync(
             MaximumRecordCount,
-            CancellationToken.None);
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         Records.Clear();
         foreach (AuditRecord record in recent
                      .OrderByDescending(item => item.TimeUtc)
@@ -100,6 +116,11 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
         }
 
         SelectedRecord = Records.FirstOrDefault();
+        if (afterRefreshAsync is not null)
+        {
+            await afterRefreshAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
     }
 
     public Task<int> CountTodayApprovalsAsync(
@@ -130,7 +151,7 @@ public sealed class RecordsViewModel : INotifyPropertyChanged
 
     private Task HandleErrorAsync(Exception exception)
     {
-        ErrorMessage = exception.Message;
+        ErrorMessage = StringResources.Get("ErrorRecordsOperationFailed");
         return Task.CompletedTask;
     }
 

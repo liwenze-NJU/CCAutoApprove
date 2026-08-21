@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Forms;
 using CCAutoApprove.App.ViewModels;
@@ -57,18 +58,25 @@ public sealed class TrayIconService : IDisposable
         notifyIcon = new NotifyIcon
         {
             Text = StringResources.Get("AppName"),
-            Icon = SystemIcons.Shield,
+            Icon = TrayStatusIconPalette.Get(mainViewModel.Status.Presentation.TrayIcon),
             ContextMenuStrip = menu,
             Visible = true
         };
         notifyIcon.DoubleClick += (_, _) => Dispatch(() => OpenPage(mainViewModel.SelectStatus));
-        controller.StateChanged += OnControllerStateChanged;
+        mainViewModel.Status.PropertyChanged += OnStatusPropertyChanged;
         RefreshMenu();
     }
 
     public bool IsExitRequested { get; private set; }
 
-    private void OnControllerStateChanged(object? sender, EventArgs eventArgs) => Dispatch(RefreshMenu);
+    private void OnStatusPropertyChanged(object? sender, PropertyChangedEventArgs eventArgs)
+    {
+        if (eventArgs.PropertyName is nameof(StatusViewModel.Presentation)
+            or nameof(StatusViewModel.SelectedProject))
+        {
+            Dispatch(RefreshMenu);
+        }
+    }
 
     private async Task ToggleApprovalAsync()
     {
@@ -77,16 +85,15 @@ public sealed class TrayIconService : IDisposable
 
     private void RefreshMenu()
     {
-        string status = controller.IsEnabled
-            ? StringResources.Get("StatusRunning")
-            : StringResources.Get("StatusPaused");
+        StatusPresentation presentation = mainViewModel.Status.Presentation;
         statusItem.Text = string.Format(
             System.Globalization.CultureInfo.CurrentCulture,
             StringResources.Get("TrayStatusFormat"),
-            status);
-        string project = string.IsNullOrWhiteSpace(controller.SelectedProject)
+            presentation.Text);
+        notifyIcon.Icon = TrayStatusIconPalette.Get(presentation.TrayIcon);
+        string project = string.IsNullOrWhiteSpace(mainViewModel.Status.SelectedProject)
             ? StringResources.Get("NoProjectSelected")
-            : controller.SelectedProject;
+            : mainViewModel.Status.SelectedProject;
         projectItem.Text = string.Format(
             System.Globalization.CultureInfo.CurrentCulture,
             StringResources.Get("TrayProjectFormat"),
@@ -179,7 +186,7 @@ public sealed class TrayIconService : IDisposable
         }
 
         disposed = true;
-        controller.StateChanged -= OnControllerStateChanged;
+        mainViewModel.Status.PropertyChanged -= OnStatusPropertyChanged;
         notifyIcon.Visible = false;
         notifyIcon.Dispose();
     }

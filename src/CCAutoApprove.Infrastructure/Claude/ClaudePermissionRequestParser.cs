@@ -55,7 +55,9 @@ public sealed class ClaudePermissionRequestParser
             || string.IsNullOrWhiteSpace(request.WorkingDirectory)
             || !Path.IsPathFullyQualified(request.WorkingDirectory)
             || string.IsNullOrWhiteSpace(request.ToolName)
-            || request.ToolInput.ValueKind != JsonValueKind.Object)
+            || request.ToolInput.ValueKind != JsonValueKind.Object
+            || request.PermissionSuggestions is JsonElement suggestions
+                && suggestions.ValueKind != JsonValueKind.Array)
         {
             throw new InvalidDataException("InvalidHookInput");
         }

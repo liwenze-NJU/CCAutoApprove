@@ -16,7 +16,7 @@ public sealed class ClaudeDoctorTests
             [
                 "ClaudeSettingsReadable", "ClaudeSettingsValid", "HookInstalled", "HookNotDuplicated",
                 "HookExecutableExists", "HookCommandPathMatches", "HooksNotDisabled", "DataDirectoryWritable",
-                "RuntimeStateValid", "SelectedProjectExists"
+                "ClaudeStructuredDecisionSupported", "RuntimeStateValid", "SelectedProjectExists"
             ],
             checks.Select(check => check.Code));
         Assert.All(checks, check => Assert.Equal(DoctorSeverity.Pass, check.Severity));
@@ -79,7 +79,7 @@ public sealed class ClaudeDoctorTests
 
         IReadOnlyList<DoctorCheck> checks = await environment.CreateDoctor().RunAsync(CancellationToken.None);
 
-        Assert.Equal(10, checks.Count);
+        Assert.Equal(11, checks.Count);
         Assert.Equal(DoctorSeverity.Error,
             Assert.Single(checks, check => check.Code == "ClaudeSettingsValid").Severity);
         Assert.All(checks, check => Assert.DoesNotContain(secretMarker, check.Message, StringComparison.Ordinal));
@@ -99,7 +99,7 @@ public sealed class ClaudeDoctorTests
             [
                 "ClaudeSettingsReadable", "ClaudeSettingsValid", "HookInstalled", "HookNotDuplicated",
                 "HookExecutableExists", "HookCommandPathMatches", "HooksNotDisabled", "DataDirectoryWritable",
-                "RuntimeStateValid", "SelectedProjectExists"
+                "ClaudeStructuredDecisionSupported", "RuntimeStateValid", "SelectedProjectExists"
             ],
             checks.Select(check => check.Code));
         Assert.Equal(DoctorSeverity.Error,
@@ -141,6 +141,32 @@ public sealed class ClaudeDoctorTests
     }
 
     [Fact]
+    public async Task RunAsync_UnrelatedPermissionRequestWithoutMatcher_RemainsValidAndOperational()
+    {
+        using var environment = await DoctorEnvironment.CreateAsync();
+        System.Text.Json.Nodes.JsonNode root = System.Text.Json.Nodes.JsonNode.Parse(
+            environment.CreateClaudeSettings())!;
+        System.Text.Json.Nodes.JsonArray permissionRequests = root["hooks"]!["PermissionRequest"]!.AsArray();
+        permissionRequests.Insert(0, System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "hooks": [
+                { "type": "command", "command": "C:\\tools\\user-approval.exe" }
+              ]
+            }
+            """));
+        await File.WriteAllTextAsync(environment.ClaudeSettingsPath, root.ToJsonString());
+        ClaudeDoctor doctor = environment.CreateDoctor();
+
+        IReadOnlyDictionary<string, DoctorCheck> checks = (await doctor.RunAsync(CancellationToken.None))
+            .ToDictionary(check => check.Code);
+
+        Assert.Equal(DoctorSeverity.Pass, checks["ClaudeSettingsValid"].Severity);
+        Assert.Equal(DoctorSeverity.Pass, checks["HookInstalled"].Severity);
+        Assert.Equal(DoctorSeverity.Pass, checks["HookNotDuplicated"].Severity);
+        Assert.True(await doctor.IsOperationalAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task RunAsync_MissingRuntimeAndSelectedProject_AreWarningsAndDoNotMakeHookInoperable()
     {
         using var environment = await DoctorEnvironment.CreateAsync();
@@ -167,6 +193,25 @@ public sealed class ClaudeDoctorTests
             candidate => candidate.Code == "HookExecutableExists");
 
         Assert.Equal(DoctorSeverity.Error, check.Severity);
+    }
+
+    [Theory]
+    [InlineData(false, "2.0.44")]
+    [InlineData(false, null)]
+    public async Task RunAsync_UnverifiableOrOldClaudeCapability_IsAnError(
+        bool supported,
+        string? version)
+    {
+        using var environment = await DoctorEnvironment.CreateAsync();
+        ClaudeDoctor doctor = environment.CreateDoctor(
+            new StubClaudeVersionCapabilityProbe(supported, version));
+
+        DoctorCheck check = Assert.Single(
+            await doctor.RunAsync(CancellationToken.None),
+            candidate => candidate.Code == "ClaudeStructuredDecisionSupported");
+
+        Assert.Equal(DoctorSeverity.Error, check.Severity);
+        Assert.False(await doctor.IsOperationalAsync(CancellationToken.None));
     }
 
     private sealed class DoctorEnvironment : IDisposable
@@ -212,12 +257,13 @@ public sealed class ClaudeDoctorTests
             return environment;
         }
 
-        public ClaudeDoctor CreateDoctor() => new(
+        public ClaudeDoctor CreateDoctor(IClaudeVersionCapabilityProbe? capabilityProbe = null) => new(
             ClaudeSettingsPath,
             CliPath,
             DataDirectoryPath,
             RuntimeStatePath,
-            SelectedProjectPath);
+            SelectedProjectPath,
+            capabilityProbe ?? new StubClaudeVersionCapabilityProbe(true, "2.0.45"));
 
         public string CreateClaudeSettings(
             int hookCopies = 1,
@@ -256,5 +302,12 @@ public sealed class ClaudeDoctorTests
                 Directory.Delete(RootPath, recursive: true);
             }
         }
+    }
+
+    private sealed class StubClaudeVersionCapabilityProbe(bool supported, string? version)
+        : IClaudeVersionCapabilityProbe
+    {
+        public Task<ClaudeVersionCapability> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new ClaudeVersionCapability(supported, version));
     }
 }

@@ -98,6 +98,39 @@ public sealed class ClaudePermissionContractTests
         await Assert.ThrowsAsync<InvalidDataException>(() => ParseAsync("{\"session_id\":"));
     }
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("\"allow\"")]
+    [InlineData("true")]
+    [InlineData("42")]
+    public async Task ParseAsync_PermissionSuggestionsThatAreNotArrays_ThrowsInvalidDataException(
+        string permissionSuggestions)
+    {
+        string json = "{\"session_id\":\"abc123\",\"cwd\":\"D:\\\\projects\\\\my-app\","
+            + "\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\","
+            + "\"tool_input\":{},\"permission_suggestions\":" + permissionSuggestions + "}";
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => ParseAsync(json));
+    }
+
+    [Fact]
+    public async Task ParseAsync_ExactlyOneMebibyteOfValidUtf8_IsAccepted()
+    {
+        const int maximumBytes = 1_048_576;
+        const string prefix = "{\"session_id\":\"abc123\",\"cwd\":\"D:\\\\projects\\\\my-app\","
+            + "\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\","
+            + "\"tool_input\":{\"padding\":\"";
+        const string suffix = "\"}}";
+        string json = prefix + new string('x', maximumBytes - prefix.Length - suffix.Length) + suffix;
+        Assert.Equal(maximumBytes, Encoding.UTF8.GetByteCount(json));
+
+        ApprovalRequest request = await ParseAsync(json);
+
+        Assert.Equal("Bash", request.ToolName);
+        Assert.Equal(maximumBytes - prefix.Length - suffix.Length,
+            request.ToolInput.GetProperty("padding").GetString()!.Length);
+    }
+
     [Fact]
     public async Task ParseAsync_InputLargerThanOneMebibyte_FailsBeforeJsonParsing()
     {

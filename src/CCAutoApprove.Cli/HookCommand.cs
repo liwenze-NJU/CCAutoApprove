@@ -50,6 +50,7 @@ public sealed class HookCommand(
         {
             try
             {
+                timeout.Token.ThrowIfCancellationRequested();
                 // This is the sole stdout commit point, after all application work succeeds.
                 // A pipe write cannot be rolled back if the OS accepts bytes and then fails;
                 // any truncated prefix is not a complete, valid Allow JSON object.

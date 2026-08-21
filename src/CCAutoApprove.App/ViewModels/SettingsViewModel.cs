@@ -13,9 +13,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private readonly IAuditLog auditLog;
     private readonly IStartupManager startupManager;
     private readonly Func<Task<bool>> confirmDeleteDetailedLogsAsync;
+    private readonly Func<Task<bool>> confirmEnableDetailedAsync;
     private readonly Func<Task> installHookAsync;
     private readonly Func<Task> runDoctorAsync;
     private readonly Func<Task> uninstallHookAsync;
+    private readonly IHookMaintenanceService? hookMaintenanceService;
     private PersistentSettings settings = new();
     private AuditDetailLevel auditDetailLevel = AuditDetailLevel.PrivacySafe;
     private bool? startupEnabled;
@@ -33,22 +35,38 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         Func<Task>? installHookAsync = null,
         Func<Task>? runDoctorAsync = null,
         Func<Task>? uninstallHookAsync = null,
-        IStartupManager? startupManager = null)
+        IStartupManager? startupManager = null,
+        Func<Task<bool>>? confirmEnableDetailedAsync = null,
+        IHookMaintenanceService? hookMaintenanceService = null,
+        string? applicationVersion = null)
     {
         this.settingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         this.auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         this.confirmDeleteDetailedLogsAsync = confirmDeleteDetailedLogsAsync
             ?? throw new ArgumentNullException(nameof(confirmDeleteDetailedLogsAsync));
+        this.confirmEnableDetailedAsync = confirmEnableDetailedAsync
+            ?? (() => Task.FromResult(false));
         this.installHookAsync = installHookAsync ?? (() => Task.CompletedTask);
         this.runDoctorAsync = runDoctorAsync ?? (() => Task.CompletedTask);
         this.uninstallHookAsync = uninstallHookAsync ?? (() => Task.CompletedTask);
+        this.hookMaintenanceService = hookMaintenanceService;
         this.startupManager = startupManager ?? new DisabledStartupManager();
+        ApplicationVersionText = string.Format(
+            System.Globalization.CultureInfo.CurrentCulture,
+            StringResources.Get("ApplicationVersionFormat"),
+            applicationVersion ?? ResolveApplicationVersion());
         SelectDisabledCommand = CreateAuditCommand(AuditDetailLevel.Disabled);
         SelectPrivacySafeCommand = CreateAuditCommand(AuditDetailLevel.PrivacySafe);
         SelectDetailedCommand = CreateAuditCommand(AuditDetailLevel.Detailed);
-        InstallHookCommand = CreateOperationCommand(this.installHookAsync);
-        DoctorCommand = CreateOperationCommand(this.runDoctorAsync);
-        UninstallHookCommand = CreateOperationCommand(this.uninstallHookAsync);
+        InstallHookCommand = hookMaintenanceService is null
+            ? CreateOperationCommand(this.installHookAsync)
+            : CreateHookOperationCommand(hookMaintenanceService.InstallAsync);
+        DoctorCommand = hookMaintenanceService is null
+            ? CreateOperationCommand(this.runDoctorAsync)
+            : CreateHookOperationCommand(hookMaintenanceService.DoctorAsync);
+        UninstallHookCommand = hookMaintenanceService is null
+            ? CreateOperationCommand(this.uninstallHookAsync)
+            : CreateHookOperationCommand(hookMaintenanceService.UninstallAsync);
         ChangeStartupEnabledCommand = new AsyncRelayCommand(
             parameter => parameter is bool enabled
                 ? ChangeStartupEnabledAsync(enabled)
@@ -99,6 +117,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         private set => SetProperty(ref operationMessage, value);
     }
 
+    public string ApplicationVersionText { get; }
+
     public AsyncRelayCommand SelectDisabledCommand { get; }
     public AsyncRelayCommand SelectPrivacySafeCommand { get; }
     public AsyncRelayCommand SelectDetailedCommand { get; }
@@ -126,17 +146,25 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             return;
         }
 
+        if (newLevel == AuditDetailLevel.Detailed
+            && AuditDetailLevel != AuditDetailLevel.Detailed
+            && !await confirmEnableDetailedAsync())
+        {
+            return;
+        }
+
         bool leavingDetailed = AuditDetailLevel == AuditDetailLevel.Detailed
             && newLevel != AuditDetailLevel.Detailed;
         bool deleteExistingLogs = leavingDetailed && await confirmDeleteDetailedLogsAsync();
-        PersistentSettings updated = settings with { AuditDetailLevel = newLevel };
-        await settingsStore.SaveAsync(updated, CancellationToken.None);
+        PersistentSettings updated = await settingsStore.UpdateAsync(
+            current => current with { AuditDetailLevel = newLevel },
+            CancellationToken.None);
         settings = updated;
         AuditDetailLevel = newLevel;
         AuditDetailLevelChanged?.Invoke(newLevel);
         if (deleteExistingLogs)
         {
-            await auditLog.ClearAsync(CancellationToken.None);
+            await auditLog.DeleteDetailedAsync(CancellationToken.None);
         }
     }
 
@@ -165,8 +193,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 startupManager.Disable();
             }
 
-            PersistentSettings updated = settings with { StartWithWindows = enabled };
-            await settingsStore.SaveAsync(updated, CancellationToken.None);
+            PersistentSettings updated = await settingsStore.UpdateAsync(
+                current => current with { StartWithWindows = enabled },
+                CancellationToken.None);
             settings = updated;
             StartupEnabled = enabled;
             OperationMessage = null;
@@ -272,10 +301,34 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             OperationMessage = StringResources.Get("OperationCompleted");
         }, HandleErrorAsync);
 
+    private AsyncRelayCommand CreateHookOperationCommand(
+        Func<CancellationToken, Task<HookOperationResult>> operation) =>
+        new(async () =>
+        {
+            OperationMessage = null;
+            HookOperationResult result = await operation(CancellationToken.None);
+            OperationMessage = StringResources.Get(result.Outcome switch
+            {
+                HookOperationOutcome.Installed => "HookInstallSucceeded",
+                HookOperationOutcome.Uninstalled => "HookUninstallSucceeded",
+                HookOperationOutcome.Healthy => "HookDoctorHealthy",
+                HookOperationOutcome.Unhealthy => "ErrorHookNotOperational",
+                _ => "ErrorOperationFailed"
+            });
+        }, HandleErrorAsync);
+
     private Task HandleErrorAsync(Exception exception)
     {
-        OperationMessage = exception.Message;
+        OperationMessage = StringResources.Get("ErrorOperationFailed");
         return Task.CompletedTask;
+    }
+
+    private static string ResolveApplicationVersion()
+    {
+        Version? version = typeof(SettingsViewModel).Assembly.GetName().Version;
+        return version is null
+            ? StringResources.Get("ValueUnknown")
+            : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
     }
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
@@ -303,6 +356,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             this.settings = settings;
             return Task.CompletedTask;
+        }
+
+        public async Task<PersistentSettings> UpdateAsync(
+            Func<PersistentSettings, PersistentSettings> update,
+            CancellationToken cancellationToken)
+        {
+            PersistentSettings updated = update(await LoadAsync(cancellationToken));
+            await SaveAsync(updated, cancellationToken);
+            return updated;
         }
     }
 

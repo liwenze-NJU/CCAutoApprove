@@ -34,6 +34,20 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public void ApplicationVersionText_UsesCentralizedFormatAndInjectedVersion()
+    {
+        var viewModel = new SettingsViewModel(
+            new FakeSettingsStore(new PersistentSettings()),
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            applicationVersion: "1.2.3");
+
+        Assert.Equal(
+            string.Format(StringResources.Get("ApplicationVersionFormat"), "1.2.3"),
+            viewModel.ApplicationVersionText);
+    }
+
+    [Fact]
     public async Task ChangeAuditDetailLevelAsync_FromDetailedToPrivacySafe_DeletesWhenUserChoosesDelete()
     {
         var settingsStore = new FakeSettingsStore(new PersistentSettings(AuditDetailLevel: AuditDetailLevel.Detailed));
@@ -49,7 +63,8 @@ public sealed class SettingsViewModelTests
         await viewModel.ChangeAuditDetailLevelAsync(AuditDetailLevel.PrivacySafe);
 
         Assert.Equal(1, promptCount);
-        Assert.True(auditLog.ClearCalled);
+        Assert.True(auditLog.DeleteDetailedCalled);
+        Assert.False(auditLog.ClearCalled);
         Assert.Equal(AuditDetailLevel.PrivacySafe, viewModel.AuditDetailLevel);
         Assert.Equal(AuditDetailLevel.PrivacySafe, settingsStore.Settings.AuditDetailLevel);
     }
@@ -72,23 +87,73 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task ChangeAuditDetailLevelAsync_WhenNotLeavingDetailed_DoesNotPrompt()
+    public async Task ChangeAuditDetailLevelAsync_EnteringDetailed_ConfirmsBeforePersistence()
     {
         var settingsStore = new FakeSettingsStore(new PersistentSettings(AuditDetailLevel: AuditDetailLevel.PrivacySafe));
         var auditLog = new FakeAuditLog();
         int promptCount = 0;
-        var viewModel = new SettingsViewModel(settingsStore, auditLog, () =>
-        {
-            promptCount++;
-            return Task.FromResult(true);
-        });
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            auditLog,
+            () => Task.FromResult(false),
+            confirmEnableDetailedAsync: () =>
+            {
+                promptCount++;
+                return Task.FromResult(true);
+            });
         await viewModel.LoadAsync();
 
         await viewModel.ChangeAuditDetailLevelAsync(AuditDetailLevel.Detailed);
 
-        Assert.Equal(0, promptCount);
+        Assert.Equal(1, promptCount);
         Assert.False(auditLog.ClearCalled);
         Assert.Equal(AuditDetailLevel.Detailed, settingsStore.Settings.AuditDetailLevel);
+    }
+
+    [Fact]
+    public async Task ChangeAuditDetailLevelAsync_EnteringDetailedWhenConsentIsCanceled_KeepsOldLevel()
+    {
+        var settingsStore = new FakeSettingsStore(
+            new PersistentSettings(AuditDetailLevel: AuditDetailLevel.PrivacySafe));
+        var auditLog = new FakeAuditLog();
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            auditLog,
+            () => Task.FromResult(false),
+            confirmEnableDetailedAsync: () => Task.FromResult(false));
+        await viewModel.LoadAsync();
+
+        await viewModel.ChangeAuditDetailLevelAsync(AuditDetailLevel.Detailed);
+
+        Assert.Equal(AuditDetailLevel.PrivacySafe, viewModel.AuditDetailLevel);
+        Assert.Equal(AuditDetailLevel.PrivacySafe, settingsStore.Settings.AuditDetailLevel);
+        Assert.False(auditLog.DeleteDetailedCalled);
+    }
+
+    [Fact]
+    public async Task AuditAndStartupUpdates_AfterProjectChange_PreserveEveryLatestField()
+    {
+        const string latestProject = @"D:\projects\latest";
+        var settingsStore = new FakeSettingsStore(new PersistentSettings());
+        var startupManager = new FakeStartupManager();
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+
+        settingsStore.Replace(settingsStore.Settings with { SelectedProject = latestProject });
+        await viewModel.ChangeAuditDetailLevelAsync(AuditDetailLevel.Disabled);
+        string? projectAfterAuditUpdate = settingsStore.Settings.SelectedProject;
+
+        settingsStore.Replace(settingsStore.Settings with { SelectedProject = latestProject });
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.Equal(latestProject, projectAfterAuditUpdate);
+        Assert.Equal(latestProject, settingsStore.Settings.SelectedProject);
+        Assert.Equal(AuditDetailLevel.Disabled, settingsStore.Settings.AuditDetailLevel);
+        Assert.True(settingsStore.Settings.StartWithWindows);
     }
 
     [Fact]
@@ -278,6 +343,45 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public async Task ChangeStartupEnabledAsync_AfterUnknownRecovery_PreservesExternalSettingsUpdates()
+    {
+        const string latestProject = @"D:\projects\latest";
+        var settingsStore = new FakeSettingsStore(new PersistentSettings())
+        {
+            SaveException = new IOException("settings write failed")
+        };
+        var startupManager = new FakeStartupManager
+        {
+            DisableException = new IOException("rollback failed"),
+            ThrowOnIsEnabledCall = 3
+        };
+        var viewModel = new SettingsViewModel(
+            settingsStore,
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            startupManager: startupManager);
+        await viewModel.LoadAsync();
+        settingsStore.Replace(settingsStore.Settings with
+        {
+            SelectedProject = latestProject,
+            AuditDetailLevel = AuditDetailLevel.Detailed
+        });
+
+        await viewModel.ChangeStartupEnabledAsync(true);
+        Assert.Null(viewModel.StartupEnabled);
+
+        settingsStore.SaveException = null;
+        startupManager.DisableException = null;
+        await viewModel.RecheckStartupCommand.ExecuteAsync();
+        await viewModel.ChangeStartupEnabledAsync(false);
+        await viewModel.ChangeStartupEnabledAsync(true);
+
+        Assert.Equal(latestProject, settingsStore.Settings.SelectedProject);
+        Assert.Equal(AuditDetailLevel.Detailed, settingsStore.Settings.AuditDetailLevel);
+        Assert.True(settingsStore.Settings.StartWithWindows);
+    }
+
+    [Fact]
     public async Task ChangeStartupEnabledCommand_WhenParameterIsNull_DoesNotMutateRegistry()
     {
         var settingsStore = new FakeSettingsStore(new PersistentSettings());
@@ -342,10 +446,30 @@ public sealed class SettingsViewModelTests
         Assert.True(viewModel.StartupEnabled);
     }
 
+    [Fact]
+    public async Task InstallHookCommand_WhenStructuredDoctorIsUnhealthy_ShowsLocalizedFailureNotCompleted()
+    {
+        var maintenance = new FakeHookMaintenanceService(
+            new HookOperationResult(HookOperationOutcome.Unhealthy, false, []));
+        var viewModel = new SettingsViewModel(
+            new FakeSettingsStore(new PersistentSettings()),
+            new FakeAuditLog(),
+            () => Task.FromResult(false),
+            hookMaintenanceService: maintenance);
+
+        await viewModel.InstallHookCommand.ExecuteAsync();
+
+        Assert.Equal(StringResources.Get("ErrorHookNotOperational"), viewModel.OperationMessage);
+        Assert.NotEqual(StringResources.Get("OperationCompleted"), viewModel.OperationMessage);
+        Assert.Equal(1, maintenance.InstallCalls);
+    }
+
     private sealed class FakeSettingsStore(PersistentSettings settings, List<string>? operations = null) : ISettingsStore
     {
         public PersistentSettings Settings { get; private set; } = settings;
-        public Exception? SaveException { get; init; }
+        public Exception? SaveException { get; set; }
+
+        public void Replace(PersistentSettings value) => Settings = value;
 
         public Task<PersistentSettings> LoadAsync(CancellationToken cancellationToken) => Task.FromResult(Settings);
 
@@ -360,11 +484,21 @@ public sealed class SettingsViewModelTests
             Settings = settings;
             return Task.CompletedTask;
         }
+
+        public async Task<PersistentSettings> UpdateAsync(
+            Func<PersistentSettings, PersistentSettings> update,
+            CancellationToken cancellationToken)
+        {
+            PersistentSettings updated = update(await LoadAsync(cancellationToken));
+            await SaveAsync(updated, cancellationToken);
+            return updated;
+        }
     }
 
     private sealed class FakeAuditLog : IAuditLog
     {
         public bool ClearCalled { get; private set; }
+        public bool DeleteDetailedCalled { get; private set; }
 
         public Task WriteAsync(ApprovalRequest request, ApprovalDecision decision, CancellationToken cancellationToken) =>
             Task.CompletedTask;
@@ -383,6 +517,12 @@ public sealed class SettingsViewModelTests
             return Task.CompletedTask;
         }
 
+        public Task DeleteDetailedAsync(CancellationToken cancellationToken)
+        {
+            DeleteDetailedCalled = true;
+            return Task.CompletedTask;
+        }
+
         public Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
@@ -391,8 +531,8 @@ public sealed class SettingsViewModelTests
         public FakeStartupManager(List<string>? operations = null) => Operations = operations ?? [];
 
         public List<string> Operations { get; }
-        public Exception? EnableException { get; init; }
-        public Exception? DisableException { get; init; }
+        public Exception? EnableException { get; set; }
+        public Exception? DisableException { get; set; }
         public int? ThrowOnIsEnabledCall { get; init; }
         public bool FailAllIsEnabledReads { get; init; }
         public bool Enabled { get; set; }
@@ -444,5 +584,39 @@ public sealed class SettingsViewModelTests
             await ReleaseSave.Task;
             settings = value;
         }
+
+        public async Task<PersistentSettings> UpdateAsync(
+            Func<PersistentSettings, PersistentSettings> update,
+            CancellationToken cancellationToken)
+        {
+            PersistentSettings updated = update(await LoadAsync(cancellationToken));
+            await SaveAsync(updated, cancellationToken);
+            return updated;
+        }
+    }
+
+    private sealed class FakeHookMaintenanceService(HookOperationResult result)
+        : IHookMaintenanceService
+    {
+        public event EventHandler<HookHealthSnapshot>? HealthChanged;
+        public HookHealthSnapshot Current { get; private set; } = HookHealthSnapshot.Unknown;
+        public int InstallCalls { get; private set; }
+
+        public Task<HookOperationResult> InstallAsync(CancellationToken cancellationToken)
+        {
+            InstallCalls++;
+            Current = new HookHealthSnapshot(result.IsOperational, result.Checks);
+            HealthChanged?.Invoke(this, Current);
+            return Task.FromResult(result);
+        }
+
+        public Task<HookOperationResult> DoctorAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(result);
+
+        public Task<HookOperationResult> UninstallAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(result);
+
+        public Task<HookHealthSnapshot> RefreshAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(Current);
     }
 }

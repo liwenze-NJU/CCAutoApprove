@@ -61,6 +61,7 @@ public partial class App : System.Windows.Application
                     paths.BasePath,
                     paths.RuntimeStatePath,
                     settings.SelectedProject);
+                var hookMaintenance = new HookMaintenanceService(hookManager, doctor);
                 var controller = new AppController(
                     settingsStore,
                     directoryService,
@@ -74,33 +75,38 @@ public partial class App : System.Windows.Application
                     async startupToken =>
                     {
                         startupToken.ThrowIfCancellationRequested();
-                        var status = new StatusViewModel(controller);
+                        StatusViewModel? status = null;
                         var records = new RecordsViewModel(
                             auditLog,
                             ConfirmClearRecordsAsync,
-                            settings.AuditDetailLevel);
+                            settings.AuditDetailLevel,
+                            token => status?.RefreshTodayCountAsync(token) ?? Task.CompletedTask);
+                        status = new StatusViewModel(
+                            controller,
+                            hookMaintenance,
+                            async token =>
+                            {
+                                DateOnly today = DateOnly.FromDateTime(DateTime.Now);
+                                using var countCancellation =
+                                    CancellationTokenSource.CreateLinkedTokenSource(token);
+                                countCancellation.CancelAfter(TimeSpan.FromSeconds(10));
+                                return await records.CountTodayApprovalsAsync(
+                                    today,
+                                    TimeZoneInfo.Local,
+                                    countCancellation.Token);
+                            });
                         var settingsViewModel = new SettingsViewModel(
                             settingsStore,
                             auditLog,
                             ConfirmDeleteDetailedLogsAsync,
-                            () => hookManager.InstallAsync(CancellationToken.None),
-                            async () => _ = await doctor.RunAsync(CancellationToken.None),
-                            () => hookManager.UninstallAsync(CancellationToken.None),
-                            new WindowsStartupManager(ResolveAppExecutablePath()));
-                        await records.LoadAsync();
+                            startupManager: new WindowsStartupManager(ResolveAppExecutablePath()),
+                            confirmEnableDetailedAsync: ConfirmEnableDetailedLogsAsync,
+                            hookMaintenanceService: hookMaintenance);
+                        await records.LoadAsync(startupToken);
                         startupToken.ThrowIfCancellationRequested();
                         await settingsViewModel.LoadAsync();
                         startupToken.ThrowIfCancellationRequested();
-                        status.SetHookHealth(await doctor.IsOperationalAsync(startupToken));
-                        startupToken.ThrowIfCancellationRequested();
-                        DateOnly today = DateOnly.FromDateTime(DateTime.Now);
-                        using var countCancellation =
-                            CancellationTokenSource.CreateLinkedTokenSource(startupToken);
-                        countCancellation.CancelAfter(TimeSpan.FromSeconds(10));
-                        status.SetTodayApprovalCount(await records.CountTodayApprovalsAsync(
-                            today,
-                            TimeZoneInfo.Local,
-                            countCancellation.Token));
+                        await hookMaintenance.RefreshAsync(startupToken);
                         startupToken.ThrowIfCancellationRequested();
 
                         var mainViewModel = new MainViewModel(status, records, settingsViewModel);
@@ -156,6 +162,14 @@ public partial class App : System.Windows.Application
         MessageBox.Show(
             Current.MainWindow,
             StringResources.Get("DeleteDetailedLogsPrompt"),
+            StringResources.Get("ConfirmTitle"),
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning) == MessageBoxResult.Yes);
+
+    private static Task<bool> ConfirmEnableDetailedLogsAsync() => Task.FromResult(
+        MessageBox.Show(
+            Current.MainWindow,
+            StringResources.Get("EnableDetailedLogsPrompt"),
             StringResources.Get("ConfirmTitle"),
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning) == MessageBoxResult.Yes);

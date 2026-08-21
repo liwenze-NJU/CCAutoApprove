@@ -11,5 +11,6 @@ public interface IAuditLog
         DateTimeOffset endUtcExclusive,
         CancellationToken cancellationToken);
     Task ClearAsync(CancellationToken cancellationToken);
+    Task DeleteDetailedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     Task DeleteExpiredAsync(int retentionDays, CancellationToken cancellationToken);
 }

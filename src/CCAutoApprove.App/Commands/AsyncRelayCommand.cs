@@ -13,7 +13,7 @@ public sealed class AsyncRelayCommand : ICommand
         Func<Task> execute,
         Func<Exception, Task> errorHandler,
         Func<bool>? canExecute = null)
-        : this(_ => execute(), errorHandler, canExecute)
+        : this(WrapLegacyExecute(execute), errorHandler, canExecute)
     {
     }
 
@@ -58,6 +58,12 @@ public sealed class AsyncRelayCommand : ICommand
     }
 
     public void RaiseCanExecuteChanged() => OnCanExecuteChanged();
+
+    private static Func<object?, Task> WrapLegacyExecute(Func<Task> execute)
+    {
+        ArgumentNullException.ThrowIfNull(execute);
+        return _ => execute();
+    }
 
     private void OnCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

@@ -17,6 +17,7 @@ public sealed class ClaudeDoctor : IHookHealthService
         "HookCommandPathMatches",
         "HooksNotDisabled",
         "DataDirectoryWritable",
+        "ClaudeStructuredDecisionSupported",
         "RuntimeStateValid",
         "SelectedProjectExists"
     ];
@@ -27,6 +28,7 @@ public sealed class ClaudeDoctor : IHookHealthService
     private readonly string runtimeStatePath;
     private readonly string? selectedProjectPath;
     private readonly string managedCommand;
+    private readonly IClaudeVersionCapabilityProbe capabilityProbe;
 
     public ClaudeDoctor(
         string claudeSettingsPath,
@@ -34,6 +36,23 @@ public sealed class ClaudeDoctor : IHookHealthService
         string dataDirectoryPath,
         string runtimeStatePath,
         string? selectedProjectPath)
+        : this(
+            claudeSettingsPath,
+            cliPath,
+            dataDirectoryPath,
+            runtimeStatePath,
+            selectedProjectPath,
+            new ClaudeVersionCapabilityProbe())
+    {
+    }
+
+    internal ClaudeDoctor(
+        string claudeSettingsPath,
+        string cliPath,
+        string dataDirectoryPath,
+        string runtimeStatePath,
+        string? selectedProjectPath,
+        IClaudeVersionCapabilityProbe capabilityProbe)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(claudeSettingsPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(cliPath);
@@ -47,6 +66,8 @@ public sealed class ClaudeDoctor : IHookHealthService
             ? null
             : Path.GetFullPath(selectedProjectPath);
         managedCommand = ClaudeHookManager.BuildCommand(cliPath);
+        this.capabilityProbe = capabilityProbe
+            ?? throw new ArgumentNullException(nameof(capabilityProbe));
     }
 
     public async Task<IReadOnlyList<DoctorCheck>> RunAsync(CancellationToken cancellationToken)
@@ -59,6 +80,7 @@ public sealed class ClaudeDoctor : IHookHealthService
             : Error("HookExecutableExists", "Hook executable is missing."));
         AddCommandPathAndDisabledChecks(checks, settings);
         checks.Add(await CheckDataDirectoryAsync(cancellationToken));
+        checks.Add(await CheckClaudeCapabilityAsync(cancellationToken));
         checks.Add(await CheckRuntimeStateAsync(cancellationToken));
         checks.Add(selectedProjectPath is not null && Directory.Exists(selectedProjectPath)
             ? Pass("SelectedProjectExists", "Selected project exists.")
@@ -203,6 +225,18 @@ public sealed class ClaudeDoctor : IHookHealthService
         {
             return Warning("RuntimeStateValid", "Runtime state could not be read.");
         }
+    }
+
+    private async Task<DoctorCheck> CheckClaudeCapabilityAsync(CancellationToken cancellationToken)
+    {
+        ClaudeVersionCapability capability = await capabilityProbe.CheckAsync(cancellationToken);
+        return capability.IsSupported
+            ? Pass("ClaudeStructuredDecisionSupported", "Claude Code supports structured PermissionRequest decisions.")
+            : Error(
+                "ClaudeStructuredDecisionSupported",
+                capability.Version is null
+                    ? "Claude Code compatibility could not be verified."
+                    : "Claude Code does not support the required structured PermissionRequest decision contract.");
     }
 
     private static bool IsCCAutoApproveHookCandidate(JsonNode? node)

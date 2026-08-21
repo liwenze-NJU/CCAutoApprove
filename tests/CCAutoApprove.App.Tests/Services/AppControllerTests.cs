@@ -449,6 +449,15 @@ public sealed class AppControllerTests
             Settings = value;
             return Task.CompletedTask;
         }
+
+        public async Task<PersistentSettings> UpdateAsync(
+            Func<PersistentSettings, PersistentSettings> update,
+            CancellationToken cancellationToken)
+        {
+            PersistentSettings updated = update(await LoadAsync(cancellationToken));
+            await SaveAsync(updated, cancellationToken);
+            return updated;
+        }
     }
 
     private sealed class FakeDirectoryService(bool exists, Action onExists) : IDirectoryService

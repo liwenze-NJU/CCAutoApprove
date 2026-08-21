@@ -1,6 +1,7 @@
 using System.Text;
 using CCAutoApprove.Core.Models;
 using CCAutoApprove.Infrastructure.Configuration;
+using System.Text.Json;
 
 namespace CCAutoApprove.Infrastructure.Tests.Configuration;
 
@@ -103,6 +104,120 @@ public sealed class JsonStoresTests
         await store.SaveAsync(expected, CancellationToken.None);
 
         Assert.Equal(expected, await store.LoadAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SettingsStore_Save_PersistsAuditDetailLevelAsBindingString()
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        var store = new JsonSettingsStore(path);
+
+        await store.SaveAsync(
+            new PersistentSettings(AuditDetailLevel: AuditDetailLevel.Detailed),
+            CancellationToken.None);
+
+        using JsonDocument document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+        Assert.Equal("Detailed",
+            document.RootElement.GetProperty("auditDetailLevel").GetString());
+    }
+
+    [Fact]
+    public async Task SettingsStore_Load_AcceptsLegacyNumericAuditLevelAndMigratesOnSave()
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        await File.WriteAllTextAsync(path,
+            "{\"schemaVersion\":1,\"selectedProject\":null,\"startWithWindows\":false,"
+            + "\"language\":\"zh-CN\",\"auditDetailLevel\":2,\"auditRetentionDays\":7}");
+        var store = new JsonSettingsStore(path);
+
+        PersistentSettings settings = await store.LoadAsync(CancellationToken.None);
+        await store.SaveAsync(settings, CancellationToken.None);
+
+        Assert.Equal(AuditDetailLevel.Detailed, settings.AuditDetailLevel);
+        using JsonDocument migrated = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+        Assert.Equal("Detailed", migrated.RootElement.GetProperty("auditDetailLevel").GetString());
+    }
+
+    [Theory]
+    [InlineData("null", 0)]
+    [InlineData("null", 3651)]
+    [InlineData("\"\"", 7)]
+    [InlineData("\"relative\\\\project\"", 7)]
+    public async Task SettingsStore_Load_RejectsInvalidRetentionAndSelectedProject(
+        string selectedProjectJson,
+        int retentionDays)
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        await File.WriteAllTextAsync(path,
+            "{\"schemaVersion\":1,\"selectedProject\":" + selectedProjectJson
+            + ",\"startWithWindows\":false,\"language\":\"zh-CN\","
+            + "\"auditDetailLevel\":\"PrivacySafe\",\"auditRetentionDays\":"
+            + retentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new JsonSettingsStore(path).LoadAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("", 7)]
+    [InlineData("relative\\project", 7)]
+    [InlineData(null, 0)]
+    [InlineData(null, 3651)]
+    public async Task SettingsStore_Save_RejectsInvalidRetentionAndSelectedProject(
+        string? selectedProject,
+        int retentionDays)
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        var store = new JsonSettingsStore(path);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(
+            new PersistentSettings(
+                SelectedProject: selectedProject,
+                AuditRetentionDays: retentionDays),
+            CancellationToken.None));
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task SettingsStore_UpdateAsync_SerializesInterleavedFieldTransformsWithoutLoss()
+    {
+        using var temp = new TemporaryDirectory();
+        string path = Path.Combine(temp.Path, "settings.json");
+        var store = new JsonSettingsStore(path);
+        await store.SaveAsync(new PersistentSettings(), CancellationToken.None);
+        using var firstTransformEntered = new ManualResetEventSlim();
+        using var releaseFirstTransform = new ManualResetEventSlim();
+        using var laterTransformEntered = new ManualResetEventSlim();
+
+        Task projectUpdate = Task.Run(() => store.UpdateAsync(current =>
+        {
+            firstTransformEntered.Set();
+            Assert.True(releaseFirstTransform.Wait(TimeSpan.FromSeconds(2)));
+            return current with { SelectedProject = @"D:\projects\latest" };
+        }, CancellationToken.None));
+        Assert.True(firstTransformEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        Task auditUpdate = store.UpdateAsync(current =>
+        {
+            laterTransformEntered.Set();
+            return current with { AuditDetailLevel = AuditDetailLevel.Detailed };
+        }, CancellationToken.None);
+        Task startupUpdate = store.UpdateAsync(
+            current => current with { StartWithWindows = true },
+            CancellationToken.None);
+
+        Assert.False(laterTransformEntered.IsSet);
+        releaseFirstTransform.Set();
+        await Task.WhenAll(projectUpdate, auditUpdate, startupUpdate);
+
+        PersistentSettings settings = await store.LoadAsync(CancellationToken.None);
+        Assert.Equal(@"D:\projects\latest", settings.SelectedProject);
+        Assert.Equal(AuditDetailLevel.Detailed, settings.AuditDetailLevel);
+        Assert.True(settings.StartWithWindows);
     }
 
     [Fact]

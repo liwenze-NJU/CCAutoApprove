@@ -1,28 +1,61 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using System.Text;
 using CCAutoApprove.Infrastructure.Configuration;
 
 namespace CCAutoApprove.Infrastructure.Claude;
 
 public sealed class ClaudeHookManager
 {
+    private const int MaximumMergeAttempts = 8;
     private static readonly JsonSerializerOptions WriteOptions = new() { WriteIndented = true };
     private readonly string settingsPath;
     private readonly string managedCommand;
-    private readonly AtomicFileWriter writer;
+    private readonly IClaudeSettingsCommitter committer;
+    private readonly Semaphore mutationSemaphore;
 
     public ClaudeHookManager(string settingsPath, string cliPath, AtomicFileWriter? writer = null)
+        : this(settingsPath, cliPath, new SnapshotClaudeSettingsCommitter(writer))
+    {
+    }
+
+    internal ClaudeHookManager(
+        string settingsPath,
+        string cliPath,
+        IClaudeSettingsCommitter committer)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(settingsPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(cliPath);
         this.settingsPath = Path.GetFullPath(settingsPath);
         managedCommand = BuildCommand(cliPath);
-        this.writer = writer ?? new AtomicFileWriter();
+        this.committer = committer ?? throw new ArgumentNullException(nameof(committer));
+        mutationSemaphore = new Semaphore(1, 1, BuildMutationSemaphoreName(this.settingsPath));
     }
 
     public async Task InstallAsync(CancellationToken cancellationToken)
     {
-        (JsonObject root, bool existed) = await LoadAsync(missingIsEmpty: true, cancellationToken);
+        using IDisposable lease = await AcquireMutationLeaseAsync(cancellationToken);
+        for (int attempt = 0; attempt < MaximumMergeAttempts; attempt++)
+        {
+            SettingsSnapshot snapshot = await LoadAsync(missingIsEmpty: true, cancellationToken);
+            bool changed = MergeInstall(snapshot.Root);
+            if (snapshot.Existed && !changed)
+            {
+                return;
+            }
+
+            if (await TryPersistAsync(snapshot.Root, snapshot, cancellationToken))
+            {
+                return;
+            }
+        }
+
+        throw new IOException("Claude settings changed repeatedly while the Hook update was being committed.");
+    }
+
+    private bool MergeInstall(JsonObject root)
+    {
         EnsureSupportedHookStructure(root);
         JsonObject hooks = GetOrCreateObject(root, "hooks");
         JsonArray permissionRequests = GetOrCreateArray(hooks, "PermissionRequest");
@@ -82,24 +115,35 @@ public sealed class ClaudeHookManager
             changed = true;
         }
 
-        if (!existed || changed)
-        {
-            await PersistAsync(root, existed, cancellationToken);
-        }
+        return changed;
     }
 
     public async Task UninstallAsync(CancellationToken cancellationToken)
     {
-        (JsonObject root, bool existed) = await LoadAsync(missingIsEmpty: true, cancellationToken);
-        if (!existed)
+        using IDisposable lease = await AcquireMutationLeaseAsync(cancellationToken);
+        for (int attempt = 0; attempt < MaximumMergeAttempts; attempt++)
         {
-            return;
+            SettingsSnapshot snapshot = await LoadAsync(missingIsEmpty: true, cancellationToken);
+            if (!snapshot.Existed || !MergeUninstall(snapshot.Root))
+            {
+                return;
+            }
+
+            if (await TryPersistAsync(snapshot.Root, snapshot, cancellationToken))
+            {
+                return;
+            }
         }
 
+        throw new IOException("Claude settings changed repeatedly while the Hook update was being committed.");
+    }
+
+    private bool MergeUninstall(JsonObject root)
+    {
         EnsureSupportedHookStructure(root);
         if (root["hooks"] is null)
         {
-            return;
+            return false;
         }
 
         if (root["hooks"] is not JsonObject hooks)
@@ -109,7 +153,7 @@ public sealed class ClaudeHookManager
 
         if (hooks["PermissionRequest"] is null)
         {
-            return;
+            return false;
         }
 
         if (hooks["PermissionRequest"] is not JsonArray permissionRequests)
@@ -146,7 +190,7 @@ public sealed class ClaudeHookManager
 
         if (!changed)
         {
-            return;
+            return false;
         }
 
         if (permissionRequests.Count == 0)
@@ -159,16 +203,17 @@ public sealed class ClaudeHookManager
             root.Remove("hooks");
         }
 
-        await PersistAsync(root, originalExisted: true, cancellationToken);
+        return true;
     }
 
     public async Task<bool> IsInstalledAsync(CancellationToken cancellationToken)
     {
         try
         {
-            (JsonObject root, bool existed) = await LoadAsync(missingIsEmpty: true, cancellationToken);
-            EnsureSupportedHookStructure(root);
-            return existed && EnumerateManagedWrapperHooks(root).Any(hook => IsOwnedHook(hook, managedCommand));
+            SettingsSnapshot snapshot = await LoadAsync(missingIsEmpty: true, cancellationToken);
+            EnsureSupportedHookStructure(snapshot.Root);
+            return snapshot.Existed
+                && EnumerateManagedWrapperHooks(snapshot.Root).Any(hook => IsOwnedHook(hook, managedCommand));
         }
         catch (InvalidDataException)
         {
@@ -215,21 +260,23 @@ public sealed class ClaudeHookManager
         }
     }
 
-    private async Task<(JsonObject Root, bool Existed)> LoadAsync(bool missingIsEmpty, CancellationToken cancellationToken)
+    private async Task<SettingsSnapshot> LoadAsync(bool missingIsEmpty, CancellationToken cancellationToken)
     {
         try
         {
-            string contents = await File.ReadAllTextAsync(settingsPath, cancellationToken);
-            JsonNode? parsed = JsonNode.Parse(contents);
-            return parsed is JsonObject root ? (root, true) : throw InvalidStructure();
+            byte[] source = await File.ReadAllBytesAsync(settingsPath, cancellationToken);
+            JsonNode? parsed = JsonNode.Parse(source);
+            return parsed is JsonObject root
+                ? new SettingsSnapshot(root, Existed: true, source)
+                : throw InvalidStructure();
         }
         catch (FileNotFoundException) when (missingIsEmpty)
         {
-            return (new JsonObject(), false);
+            return new SettingsSnapshot(new JsonObject(), Existed: false, Source: null);
         }
         catch (DirectoryNotFoundException) when (missingIsEmpty)
         {
-            return (new JsonObject(), false);
+            return new SettingsSnapshot(new JsonObject(), Existed: false, Source: null);
         }
         catch (JsonException exception)
         {
@@ -237,24 +284,39 @@ public sealed class ClaudeHookManager
         }
     }
 
-    private async Task PersistAsync(JsonObject root, bool originalExisted, CancellationToken cancellationToken)
+    private async Task<bool> TryPersistAsync(
+        JsonObject root,
+        SettingsSnapshot snapshot,
+        CancellationToken cancellationToken)
     {
         string? backupPath = null;
-        if (originalExisted)
+        if (snapshot.Existed)
         {
-            backupPath = CreateBackupPath();
-            File.Copy(settingsPath, backupPath, overwrite: false);
+            backupPath = await CreateBackupAsync(snapshot.Source!, cancellationToken);
         }
 
         string json = root.ToJsonString(WriteOptions);
         try
         {
-            await writer.WriteAllTextAsync(settingsPath, json, cancellationToken);
-            string written = await File.ReadAllTextAsync(settingsPath, cancellationToken);
-            if (JsonNode.Parse(written) is not JsonObject)
+            bool committed = await committer.TryCommitAsync(
+                settingsPath,
+                snapshot.Source,
+                json,
+                cancellationToken);
+            if (!committed)
             {
-                throw InvalidStructure();
+                DeleteBackup(backupPath);
+                return false;
             }
+
+            byte[] writtenSource = await File.ReadAllBytesAsync(settingsPath, cancellationToken);
+            JsonNode? written = JsonNode.Parse(writtenSource);
+            if (written is not JsonObject writtenRoot || !JsonNode.DeepEquals(root, writtenRoot))
+            {
+                return false;
+            }
+
+            return true;
         }
         catch
         {
@@ -262,12 +324,35 @@ public sealed class ClaudeHookManager
             {
                 await RestoreBackupAsync(backupPath);
             }
-            else if (!originalExisted && File.Exists(settingsPath))
+            else if (!snapshot.Existed && File.Exists(settingsPath))
             {
                 File.Delete(settingsPath);
             }
 
             throw;
+        }
+    }
+
+    private async Task<string> CreateBackupAsync(byte[] source, CancellationToken cancellationToken)
+    {
+        string backupPath = CreateBackupPath();
+        await using var backup = new FileStream(
+            backupPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await backup.WriteAsync(source, cancellationToken);
+        await backup.FlushAsync(cancellationToken);
+        return backupPath;
+    }
+
+    private static void DeleteBackup(string? backupPath)
+    {
+        if (backupPath is not null && File.Exists(backupPath))
+        {
+            File.Delete(backupPath);
         }
     }
 
@@ -281,6 +366,25 @@ public sealed class ClaudeHookManager
         }
 
         return candidate;
+    }
+
+    private async Task<IDisposable> AcquireMutationLeaseAsync(CancellationToken cancellationToken)
+    {
+        await Task.Run(() =>
+        {
+            int signaled = WaitHandle.WaitAny([mutationSemaphore, cancellationToken.WaitHandle]);
+            if (signaled != 0)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+        }, CancellationToken.None);
+        return new SemaphoreLease(mutationSemaphore);
+    }
+
+    private static string BuildMutationSemaphoreName(string path)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
+        return $"Local\\CCAutoApprove.ClaudeSettings.{Convert.ToHexString(hash)}";
     }
 
     private static JsonObject GetOrCreateObject(JsonObject parent, string propertyName)
@@ -335,9 +439,14 @@ public sealed class ClaudeHookManager
         foreach (JsonNode? entryNode in permissionRequests)
         {
             if (entryNode is not JsonObject entry
-                || !TryGetRequiredString(entry, "matcher", out _)
                 || !TryGetProperty(entry, "hooks", out JsonNode? entryHooksNode)
                 || entryHooksNode is not JsonArray entryHooks)
+            {
+                return false;
+            }
+
+            bool hasMatcher = TryGetProperty(entry, "matcher", out JsonNode? matcherNode);
+            if (hasMatcher && !TryReadString(matcherNode, out _))
             {
                 return false;
             }
@@ -437,6 +546,18 @@ public sealed class ClaudeHookManager
             {
                 File.Delete(restorePath);
             }
+        }
+    }
+
+    private readonly record struct SettingsSnapshot(JsonObject Root, bool Existed, byte[]? Source);
+
+    private sealed class SemaphoreLease(Semaphore semaphore) : IDisposable
+    {
+        private Semaphore? semaphore = semaphore;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref semaphore, null)?.Release();
         }
     }
 }

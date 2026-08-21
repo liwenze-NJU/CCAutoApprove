@@ -21,12 +21,24 @@ public sealed class JsonLineAuditLog : IAuditLog
     private readonly string logsDirectory;
     private readonly PersistentSettings settings;
     private readonly IClock clock;
+    private readonly IAuditFileRewriter auditFileRewriter;
 
     public JsonLineAuditLog(AppPaths paths, PersistentSettings settings, IClock clock)
+        : this(paths, settings, clock, new AtomicAuditFileRewriter())
+    {
+    }
+
+    internal JsonLineAuditLog(
+        AppPaths paths,
+        PersistentSettings settings,
+        IClock clock,
+        IAuditFileRewriter auditFileRewriter)
     {
         ArgumentNullException.ThrowIfNull(paths);
         this.settings = settings ?? throw new ArgumentNullException(nameof(settings));
         this.clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        this.auditFileRewriter = auditFileRewriter
+            ?? throw new ArgumentNullException(nameof(auditFileRewriter));
         logsDirectory = Path.Combine(paths.BasePath, "logs");
     }
 
@@ -71,11 +83,12 @@ public sealed class JsonLineAuditLog : IAuditLog
         return Task.Run<IReadOnlyList<AuditRecord>>(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var records = new List<AuditRecord>();
-            WithMutex(cancellationToken, () => ReadRecords(records, cancellationToken));
-            return records
+            var newest = new PriorityQueue<AuditRecord, DateTimeOffset>();
+            WithMutex(cancellationToken, () =>
+                ReadNewestRecords(newest, maximumCount, cancellationToken));
+            return newest.UnorderedItems
+                .Select(item => item.Element)
                 .OrderByDescending(record => record.TimeUtc)
-                .Take(maximumCount)
                 .ToArray();
         }, CancellationToken.None);
     }
@@ -119,6 +132,24 @@ public sealed class JsonLineAuditLog : IAuditLog
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 File.Delete(filePath);
+            }
+        }), CancellationToken.None);
+    }
+
+    public Task DeleteDetailedAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.Run(() => WithMutex(cancellationToken, () =>
+        {
+            if (!Directory.Exists(logsDirectory))
+            {
+                return;
+            }
+
+            foreach (string filePath in Directory.EnumerateFiles(logsDirectory, "audit-*.jsonl"))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RemoveDetailedRecords(filePath, cancellationToken);
             }
         }), CancellationToken.None);
     }
@@ -167,15 +198,34 @@ public sealed class JsonLineAuditLog : IAuditLog
                 : null);
     }
 
-    private void ReadRecords(List<AuditRecord> records, CancellationToken cancellationToken)
+    private void ReadNewestRecords(
+        PriorityQueue<AuditRecord, DateTimeOffset> newest,
+        int maximumCount,
+        CancellationToken cancellationToken)
     {
         if (!Directory.Exists(logsDirectory))
         {
             return;
         }
 
-        foreach (string filePath in Directory.EnumerateFiles(logsDirectory, "audit-*.jsonl"))
+        (string Path, DateOnly Date)[] partitions = Directory
+            .EnumerateFiles(logsDirectory, "audit-*.jsonl")
+            .Select(path => (Path: path, HasDate: TryGetAuditDate(path, out DateOnly date), Date: date))
+            .Where(partition => partition.HasDate)
+            .OrderByDescending(partition => partition.Date)
+            .Select(partition => (partition.Path, partition.Date))
+            .ToArray();
+
+        foreach ((string filePath, DateOnly partitionDate) in partitions)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (newest.Count == maximumCount
+                && newest.TryPeek(out _, out DateTimeOffset oldestRetained)
+                && oldestRetained >= PartitionEndUtc(partitionDate))
+            {
+                break;
+            }
+
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             while (reader.ReadLine() is { } line)
@@ -186,7 +236,7 @@ public sealed class JsonLineAuditLog : IAuditLog
                     AuditRecord? record = JsonSerializer.Deserialize<AuditRecord>(line, LogJsonOptions);
                     if (record is not null)
                     {
-                        records.Add(record);
+                        AddToBoundedNewest(newest, record, maximumCount);
                     }
                 }
                 catch (JsonException)
@@ -196,6 +246,28 @@ public sealed class JsonLineAuditLog : IAuditLog
             }
         }
     }
+
+    private static void AddToBoundedNewest(
+        PriorityQueue<AuditRecord, DateTimeOffset> newest,
+        AuditRecord record,
+        int maximumCount)
+    {
+        if (newest.Count < maximumCount)
+        {
+            newest.Enqueue(record, record.TimeUtc);
+            return;
+        }
+
+        if (newest.TryPeek(out _, out DateTimeOffset oldestRetained)
+            && record.TimeUtc > oldestRetained)
+        {
+            newest.Dequeue();
+            newest.Enqueue(record, record.TimeUtc);
+        }
+    }
+
+    private static DateTimeOffset PartitionEndUtc(DateOnly partitionDate) =>
+        new(partitionDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
 
     private int CountAllowedRecords(
         DateTimeOffset startUtcInclusive,
@@ -243,6 +315,45 @@ public sealed class JsonLineAuditLog : IAuditLog
         }
 
         return count;
+    }
+
+    private void RemoveDetailedRecords(
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        string[] lines = File.ReadAllLines(filePath, Encoding.UTF8);
+        string[] retained = lines.Where(line =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return !ContainsDetailedFields(line);
+        }).ToArray();
+        if (retained.Length == lines.Length)
+        {
+            return;
+        }
+
+        auditFileRewriter.Rewrite(filePath, retained, cancellationToken);
+    }
+
+    private static bool ContainsDetailedFields(string line)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(line);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            return document.RootElement.TryGetProperty("sessionId", out _)
+                || document.RootElement.TryGetProperty("permissionMode", out _)
+                || document.RootElement.TryGetProperty("toolInput", out _)
+                || document.RootElement.TryGetProperty("permissionSuggestions", out _);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static async Task RunWithoutAffectingDecisionAsync(Action action, CancellationToken cancellationToken)

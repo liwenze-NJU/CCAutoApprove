@@ -96,6 +96,73 @@ public sealed class HookProcessContractTests
         Assert.False(Directory.Exists(Path.Combine(scenario.DataDirectory, "logs")));
     }
 
+    [Theory]
+    [InlineData(SettingsFileState.Missing)]
+    [InlineData(SettingsFileState.Malformed)]
+    [InlineData(SettingsFileState.Unreadable)]
+    public async Task HookProcess_WhenSettingsCannotBeStrictlyLoaded_AsksWithoutCreatingAudit(
+        SettingsFileState settingsFileState)
+    {
+        await using var scenario = await ProcessScenario.CreateAsync(
+            enabled: true,
+            heartbeatAge: TimeSpan.Zero,
+            projectMatches: true);
+        await scenario.SetSettingsFileStateAsync(settingsFileState);
+
+        ProcessResult result = await scenario.RunAsync(scenario.ValidFixtureBytes);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StandardOutput);
+        Assert.Empty(result.StandardError);
+        Assert.False(Directory.Exists(Path.Combine(scenario.DataDirectory, "logs")));
+    }
+
+    [Fact]
+    public async Task HookProcess_WhenPermissionSuggestionsHasWrongType_WritesZeroBytes()
+    {
+        await using var scenario = await ProcessScenario.CreateAsync(
+            enabled: true,
+            heartbeatAge: TimeSpan.Zero,
+            projectMatches: true);
+        byte[] input = Encoding.UTF8.GetBytes(
+            "{\"session_id\":\"process-session\",\"cwd\":"
+            + System.Text.Json.JsonSerializer.Serialize(scenario.ProjectDirectory)
+            + ",\"permission_mode\":\"default\",\"hook_event_name\":\"PermissionRequest\","
+            + "\"tool_name\":\"Bash\",\"tool_input\":{},\"permission_suggestions\":{}}");
+
+        ProcessResult result = await scenario.RunAsync(input);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StandardOutput);
+        Assert.Empty(result.StandardError);
+    }
+
+    [Fact]
+    public async Task StatusProcess_WhenSettingsAreMissing_RemainsAvailableForRepairCommands()
+    {
+        await using var scenario = await ProcessScenario.CreateAsync(
+            enabled: true,
+            heartbeatAge: TimeSpan.Zero,
+            projectMatches: true);
+        await scenario.SetSettingsFileStateAsync(SettingsFileState.Missing);
+
+        ProcessResult result = await scenario.RunAsync([], "status");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Empty(result.StandardError);
+        using System.Text.Json.JsonDocument status =
+            System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+        Assert.False(status.RootElement.GetProperty("hookInstalled").GetBoolean());
+        Assert.False(status.RootElement.GetProperty("autoApproveEnabled").GetBoolean());
+    }
+
+    public enum SettingsFileState
+    {
+        Missing,
+        Malformed,
+        Unreadable
+    }
+
     private sealed class ProcessScenario : IAsyncDisposable
     {
         private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(2);
@@ -118,6 +185,7 @@ public sealed class HookProcessContractTests
         }
 
         public string DataDirectory { get; }
+        public string ProjectDirectory => projectDirectory;
 
         public byte[] ValidFixtureBytes => Encoding.UTF8.GetBytes(
             "{\"session_id\":\"process-session\",\"cwd\":"
@@ -162,7 +230,9 @@ public sealed class HookProcessContractTests
             return new ProcessScenario(root, data, claudeSettings, project);
         }
 
-        public async Task<ProcessResult> RunAsync(byte[] standardInput)
+        public async Task<ProcessResult> RunAsync(
+            byte[] standardInput,
+            string arguments = "hook")
         {
             string assemblyPath = typeof(CliApplication).Assembly.Location;
             string cliPath = Path.ChangeExtension(assemblyPath, ".exe");
@@ -171,7 +241,7 @@ public sealed class HookProcessContractTests
             var startInfo = new ProcessStartInfo
             {
                 FileName = cliPath,
-                Arguments = "hook",
+                Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
@@ -219,6 +289,25 @@ public sealed class HookProcessContractTests
                 standardOutput.ToArray(),
                 standardError.ToArray(),
                 stopwatch.Elapsed);
+        }
+
+        public async Task SetSettingsFileStateAsync(SettingsFileState state)
+        {
+            string path = Path.Combine(DataDirectory, "settings.json");
+            File.Delete(path);
+            switch (state)
+            {
+                case SettingsFileState.Missing:
+                    return;
+                case SettingsFileState.Malformed:
+                    await File.WriteAllTextAsync(path, "{\"auditDetailLevel\":");
+                    return;
+                case SettingsFileState.Unreadable:
+                    Directory.CreateDirectory(path);
+                    return;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(state));
+            }
         }
 
         public ValueTask DisposeAsync()

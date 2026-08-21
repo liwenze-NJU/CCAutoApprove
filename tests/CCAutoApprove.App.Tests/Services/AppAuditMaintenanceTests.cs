@@ -28,7 +28,8 @@ public sealed class AppAuditMaintenanceTests
         var settings = new SettingsViewModel(
             settingsStore,
             maintenanceLog,
-            () => Task.FromResult(true));
+            () => Task.FromResult(true),
+            confirmEnableDetailedAsync: () => Task.FromResult(true));
         await settings.LoadAsync();
         await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.Detailed);
 
@@ -48,9 +49,13 @@ public sealed class AppAuditMaintenanceTests
         await settings.ChangeAuditDetailLevelAsync(AuditDetailLevel.PrivacySafe);
 
         Assert.Empty(await maintenanceLog.ReadRecentAsync(10, CancellationToken.None));
-        Assert.Empty(Directory.EnumerateFiles(
-            Path.Combine(temp.Path, "logs"),
-            "audit-*.jsonl"));
+        Assert.DoesNotContain(
+            "review-secret",
+            string.Concat(Directory.EnumerateFiles(
+                    Path.Combine(temp.Path, "logs"),
+                    "audit-*.jsonl")
+                .Select(File.ReadAllText)),
+            StringComparison.Ordinal);
     }
 
     [Fact]

@@ -8,26 +8,53 @@ namespace CCAutoApprove.App.ViewModels;
 public sealed class StatusViewModel : INotifyPropertyChanged
 {
     private readonly AppController controller;
+    private readonly IHookMaintenanceService? hookMaintenanceService;
+    private readonly Func<CancellationToken, Task<int>>? refreshTodayCountAsync;
     private readonly SynchronizationContext? synchronizationContext;
     private string selectedProject;
-    private string statusText;
     private string? errorMessage;
     private bool isEnabled;
     private string hookHealthText;
+    private bool? hookOperational;
+    private StatusPresentation presentation;
     private int todayApprovalCount;
 
-    public StatusViewModel(AppController controller)
+    public StatusViewModel(
+        AppController controller,
+        IHookMaintenanceService? hookMaintenanceService = null,
+        Func<CancellationToken, Task<int>>? refreshTodayCountAsync = null)
     {
         this.controller = controller ?? throw new ArgumentNullException(nameof(controller));
+        this.hookMaintenanceService = hookMaintenanceService;
+        this.refreshTodayCountAsync = refreshTodayCountAsync;
         synchronizationContext = SynchronizationContext.Current;
         selectedProject = controller.SelectedProject;
         isEnabled = controller.IsEnabled;
-        statusText = GetStatusText(controller.IsEnabled, controller.ErrorCode);
-        hookHealthText = StringResources.Get("HookHealthUnknown");
+        hookOperational = hookMaintenanceService?.Current.IsOperational;
+        presentation = StatusPresentationMapper.Map(
+            controller.IsEnabled,
+            controller.ErrorCode,
+            hookOperational);
+        hookHealthText = GetHookHealthText(hookOperational);
         errorMessage = GetErrorMessage(controller.ErrorCode);
         ToggleApprovalCommand = new AsyncRelayCommand(ToggleApprovalAsync, HandleCommandErrorAsync);
         ChooseProjectCommand = new RelayCommand(_ => ChooseProject(), _ => !IsEnabled);
+        InstallHookCommand = new AsyncRelayCommand(
+            () => RunHookOperationAsync(service => service.InstallAsync(CancellationToken.None)),
+            HandleCommandErrorAsync,
+            () => this.hookMaintenanceService is not null);
+        DoctorCommand = new AsyncRelayCommand(
+            () => RunHookOperationAsync(service => service.DoctorAsync(CancellationToken.None)),
+            HandleCommandErrorAsync,
+            () => this.hookMaintenanceService is not null);
+        RefreshCommand = new AsyncRelayCommand(
+            () => RefreshStatusAsync(CancellationToken.None),
+            HandleCommandErrorAsync);
         controller.StateChanged += OnControllerStateChanged;
+        if (hookMaintenanceService is not null)
+        {
+            hookMaintenanceService.HealthChanged += OnHookHealthChanged;
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -46,11 +73,10 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         }
     }
 
-    public string StatusText
-    {
-        get => statusText;
-        private set => SetProperty(ref statusText, value);
-    }
+    public StatusPresentation Presentation => presentation;
+    public string StatusText => Presentation.Text;
+    public string StatusIconGlyph => Presentation.IconGlyph;
+    public string StatusColor => Presentation.Color;
 
     public string SelectedProject
     {
@@ -87,14 +113,33 @@ public sealed class StatusViewModel : INotifyPropertyChanged
 
     public AsyncRelayCommand ToggleApprovalCommand { get; }
     public RelayCommand ChooseProjectCommand { get; }
+    public AsyncRelayCommand InstallHookCommand { get; }
+    public AsyncRelayCommand DoctorCommand { get; }
+    public AsyncRelayCommand RefreshCommand { get; }
 
-    public void SetHookHealth(bool operational) =>
-        HookHealthText = StringResources.Get(operational ? "HookHealthy" : "HookUnhealthy");
+    public void SetHookHealth(bool operational)
+    {
+        hookOperational = operational;
+        HookHealthText = GetHookHealthText(operational);
+        UpdatePresentation(controller.ErrorCode);
+    }
 
     public void SetTodayApprovalCount(int count)
     {
         todayApprovalCount = Math.Max(0, count);
         OnPropertyChanged(nameof(TodayApprovalCountText));
+    }
+
+    public async Task RefreshTodayCountAsync(CancellationToken cancellationToken)
+    {
+        if (refreshTodayCountAsync is null)
+        {
+            return;
+        }
+
+        int count = await refreshTodayCountAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        SetTodayApprovalCount(count);
     }
 
     private void ChooseProject()
@@ -125,6 +170,35 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         }
     }
 
+    private async Task RunHookOperationAsync(
+        Func<IHookMaintenanceService, Task<HookOperationResult>> operation)
+    {
+        if (hookMaintenanceService is null)
+        {
+            return;
+        }
+
+        ErrorMessage = null;
+        HookOperationResult result = await operation(hookMaintenanceService);
+        if (result.Outcome is HookOperationOutcome.Unhealthy or HookOperationOutcome.Failed)
+        {
+            ErrorMessage = StringResources.Get(result.Outcome == HookOperationOutcome.Unhealthy
+                ? "ErrorHookNotOperational"
+                : "ErrorOperationFailed");
+        }
+    }
+
+    private async Task RefreshStatusAsync(CancellationToken cancellationToken)
+    {
+        ErrorMessage = null;
+        if (hookMaintenanceService is not null)
+        {
+            await hookMaintenanceService.RefreshAsync(cancellationToken);
+        }
+
+        await RefreshTodayCountAsync(cancellationToken);
+    }
+
     private Task HandleCommandErrorAsync(Exception exception)
     {
         RunOnCapturedContext(() =>
@@ -136,16 +210,24 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private void OnControllerStateChanged(object? sender, EventArgs eventArgs) =>
         RunOnCapturedContext(RefreshFromController);
 
+    private void OnHookHealthChanged(object? sender, HookHealthSnapshot snapshot) =>
+        RunOnCapturedContext(() =>
+        {
+            hookOperational = snapshot.IsOperational;
+            HookHealthText = GetHookHealthText(snapshot.IsOperational);
+            UpdatePresentation(controller.ErrorCode);
+        });
+
     private void RefreshFromController()
     {
         string? controllerError = controller.ErrorCode;
         IsEnabled = controller.IsEnabled;
-        StatusText = GetStatusText(controller.IsEnabled, controllerError);
         ErrorMessage = GetErrorMessage(controllerError);
         if (controllerError is null or AppController.HeartbeatWriteFailed)
         {
             SelectedProject = controller.SelectedProject;
         }
+        UpdatePresentation(controllerError);
     }
 
     private void RunOnCapturedContext(Action action)
@@ -158,12 +240,30 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         action();
     }
 
-    private static string GetStatusText(bool enabled, string? currentErrorCode) =>
-        currentErrorCode is AppController.HeartbeatWriteFailed or AppController.SelectedProjectNotFound
-            ? StringResources.Get("StatusError")
-            : enabled
-                ? StringResources.Get("StatusRunning")
-                : StringResources.Get("StatusPaused");
+    private void UpdatePresentation(string? currentErrorCode)
+    {
+        StatusPresentation updated = StatusPresentationMapper.Map(
+            controller.IsEnabled,
+            currentErrorCode,
+            hookOperational);
+        if (Equals(presentation, updated))
+        {
+            return;
+        }
+
+        presentation = updated;
+        OnPropertyChanged(nameof(Presentation));
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(StatusIconGlyph));
+        OnPropertyChanged(nameof(StatusColor));
+    }
+
+    private static string GetHookHealthText(bool? operational) => StringResources.Get(operational switch
+    {
+        true => "HookHealthy",
+        false => "HookUnhealthy",
+        null => "HookHealthUnknown"
+    });
 
     private static string? GetErrorMessage(string? errorCode) => errorCode switch
     {
