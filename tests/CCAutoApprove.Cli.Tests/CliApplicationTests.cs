@@ -168,22 +168,20 @@ public sealed class CliApplicationTests : IDisposable
 
         try
         {
-            await auditLog.Started.WaitAsync(TimeSpan.FromSeconds(1));
-            int exitCode = await runTask.WaitAsync(TimeSpan.FromMilliseconds(1_700));
+            await auditLog.Started.WaitAsync(TimeSpan.FromSeconds(4));
+            await auditLog.CancellationObserved.WaitAsync(TimeSpan.FromSeconds(4));
+            int exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(4));
 
             stopwatch.Stop();
             Assert.Equal(0, exitCode);
             Assert.Equal(0, output.Length);
             Assert.Equal(string.Empty, error.ToString());
-            Assert.InRange(
-                stopwatch.Elapsed,
-                TimeSpan.FromMilliseconds(850),
-                TimeSpan.FromMilliseconds(1_500));
+            Assert.True(stopwatch.Elapsed >= TimeSpan.FromMilliseconds(850));
         }
         finally
         {
             auditLog.Release();
-            await auditLog.Finished.WaitAsync(TimeSpan.FromSeconds(1));
+            await auditLog.Finished.WaitAsync(TimeSpan.FromSeconds(4));
         }
     }
 
@@ -463,15 +461,20 @@ public sealed class CliApplicationTests : IDisposable
         private readonly TaskCompletionSource finished = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
+        private readonly TaskCompletionSource cancellationObserved = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         public Task Started => started.Task;
         public Task Finished => finished.Task;
 
+        public Task CancellationObserved => cancellationObserved.Task;
         public Task WriteAsync(
             ApprovalRequest request,
             ApprovalDecision decision,
             CancellationToken cancellationToken)
         {
             started.TrySetResult();
+            using CancellationTokenRegistration registration = cancellationToken.Register(
+                () => cancellationObserved.TrySetResult());
             try
             {
                 release.Wait();

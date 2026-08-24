@@ -95,9 +95,12 @@ public sealed class HookCommand(
         ApprovalDecision decision,
         CancellationToken cancellationToken)
     {
-        Task write = Task.Run(
+        Task write = Task.Factory.StartNew(
             () => auditLog.WriteAsync(request, decision, cancellationToken),
-            cancellationToken);
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default)
+            .Unwrap();
         ObserveFault(write);
         await write.WaitAsync(cancellationToken);
     }
