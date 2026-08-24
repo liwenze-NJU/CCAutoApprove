@@ -63,13 +63,13 @@ public sealed class CliApplicationTests : IDisposable
         }
 
         var stopwatch = Stopwatch.StartNew();
-        Task<int> runTask = Task.Run(() => CliApplication.RunProductionAsync(
+        Task<int> runTask = CliApplication.RunProductionAsync(
             ["hook"],
             input,
             output,
             error,
             CancellationToken.None,
-            BlockingFactory));
+            BlockingFactory);
 
         try
         {

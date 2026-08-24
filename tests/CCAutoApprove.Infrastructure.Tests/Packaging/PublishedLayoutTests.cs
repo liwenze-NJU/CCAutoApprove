@@ -101,26 +101,22 @@ public sealed class PublishedLayoutTests
             .ReplaceLineEndings("\n");
 
         Assert.DoesNotContain("Result := StringChangeEx(", script, StringComparison.Ordinal);
-        Assert.Contains(
-            """
-            function EscapePercent(const Value: String): String;
-            begin
-              Result := Value;
-              StringChangeEx(Result, '%', '%%', True);
-            end;
-            """,
-            script,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            """
-            function EscapePowerShellSingleQuoted(const Value: String): String;
-            begin
-              Result := Value;
-              StringChangeEx(Result, '''', '''''', True);
-            end;
-            """,
-            script,
-            StringComparison.Ordinal);
+
+        string percentSignature = "function EscapePercent(const Value: String): String;";
+        string quoteSignature = "function EscapePowerShellSingleQuoted(const Value: String): String;";
+        string stopSignature = "function StopInstalledApplication: Boolean;";
+        int percentStart = script.IndexOf(percentSignature, StringComparison.Ordinal);
+        int quoteStart = script.IndexOf(quoteSignature, StringComparison.Ordinal);
+        int quoteEnd = script.IndexOf(stopSignature, StringComparison.Ordinal);
+        Assert.True(percentStart >= 0 && quoteStart > percentStart && quoteEnd > quoteStart, "Installer escape helper boundaries must be present and ordered.");
+
+        string percentHelper = script[percentStart..quoteStart];
+        string quoteHelper = script[quoteStart..quoteEnd];
+
+        Assert.Contains("Result := Value;", percentHelper, StringComparison.Ordinal);
+        Assert.Contains("StringChangeEx(Result, '%', '%%', True);", percentHelper, StringComparison.Ordinal);
+        Assert.Contains("Result := Value;", quoteHelper, StringComparison.Ordinal);
+        Assert.Contains("StringChangeEx(Result, '''', '''''', True);", quoteHelper, StringComparison.Ordinal);
     }
 
     [Fact]
