@@ -70,12 +70,9 @@ public sealed class CliApplication(
         timeout.CancelAfter(HookTotalTimeout);
         try
         {
-            Task<CliApplication> initialization = Task.Factory.StartNew(
-                    () => applicationFactory(timeout.Token),
-                    CancellationToken.None,
-                    TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default)
-                .Unwrap();
+            Task<CliApplication> initialization = Task.Run(
+                () => applicationFactory(timeout.Token),
+                timeout.Token);
             ObserveFault(initialization);
             CliApplication application = await initialization.WaitAsync(timeout.Token);
             return await application.RunAsync(args, input, output, error, timeout.Token);

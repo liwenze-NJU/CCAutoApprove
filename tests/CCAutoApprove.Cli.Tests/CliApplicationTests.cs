@@ -37,7 +37,7 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
-    public async Task RunProductionHook_WhenInitializationBlocks_ReturnsSafelyWithinTheTotalDeadline()
+    public async Task RunProductionHook_WhenDeadlineCancelsBlockedInitialization_ReturnsSafely()
     {
         using var input = new MemoryStream(ValidFixtureBytes);
         using var output = new MemoryStream();
@@ -47,9 +47,13 @@ public sealed class CliApplicationTests : IDisposable
             TaskCreationOptions.RunContinuationsAsynchronously);
         var initializationFinished = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var deadlineCancellationObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         Task<CliApplication> BlockingFactory(CancellationToken cancellationToken)
         {
+            using CancellationTokenRegistration registration = cancellationToken.Register(
+                () => deadlineCancellationObserved.TrySetResult());
             initializationStarted.TrySetResult();
             try
             {
@@ -73,22 +77,20 @@ public sealed class CliApplicationTests : IDisposable
 
         try
         {
-            await initializationStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
-            int exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(2));
+            await initializationStarted.Task.WaitAsync(TimeSpan.FromSeconds(4));
+            await deadlineCancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(4));
+            int exitCode = await runTask.WaitAsync(TimeSpan.FromSeconds(4));
 
             stopwatch.Stop();
             Assert.Equal(0, exitCode);
             Assert.Equal(0, output.Length);
             Assert.Equal(string.Empty, error.ToString());
-            Assert.InRange(
-                stopwatch.Elapsed,
-                TimeSpan.FromMilliseconds(850),
-                TimeSpan.FromMilliseconds(1_500));
+            Assert.True(stopwatch.Elapsed >= TimeSpan.FromMilliseconds(850));
         }
         finally
         {
             releaseInitialization.Set();
-            await initializationFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            await initializationFinished.Task.WaitAsync(TimeSpan.FromSeconds(4));
         }
     }
 

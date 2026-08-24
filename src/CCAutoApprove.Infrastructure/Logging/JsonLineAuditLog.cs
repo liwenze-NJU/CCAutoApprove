@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -10,7 +11,7 @@ namespace CCAutoApprove.Infrastructure.Logging;
 
 public sealed class JsonLineAuditLog : IAuditLog
 {
-    private const string MutexName = @"Local\CCAutoApprove.AuditLog";
+    private const string MutexNamePrefix = @"Local\CCAutoApprove.AuditLog.";
     private static readonly TimeSpan MutexTimeout = TimeSpan.FromMilliseconds(50);
     private static readonly JsonSerializerOptions LogJsonOptions = new(JsonDefaults.Options)
     {
@@ -19,6 +20,7 @@ public sealed class JsonLineAuditLog : IAuditLog
     };
 
     private readonly string logsDirectory;
+    private readonly string mutexName;
     private readonly PersistentSettings settings;
     private readonly IClock clock;
     private readonly IAuditFileRewriter auditFileRewriter;
@@ -40,6 +42,7 @@ public sealed class JsonLineAuditLog : IAuditLog
         this.auditFileRewriter = auditFileRewriter
             ?? throw new ArgumentNullException(nameof(auditFileRewriter));
         logsDirectory = Path.Combine(paths.BasePath, "logs");
+        mutexName = CreateMutexName(logsDirectory);
     }
 
     public Task WriteAsync(
@@ -372,9 +375,17 @@ public sealed class JsonLineAuditLog : IAuditLog
         }
     }
 
-    private static bool TryWithMutex(CancellationToken cancellationToken, Action action)
+    internal static string CreateMutexName(string logsDirectory)
     {
-        using var mutex = new Mutex(initiallyOwned: false, MutexName);
+        string normalizedPath = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(logsDirectory)).ToUpperInvariant();
+        byte[] pathHash = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedPath));
+        return MutexNamePrefix + Convert.ToHexString(pathHash);
+    }
+
+    private bool TryWithMutex(CancellationToken cancellationToken, Action action)
+    {
+        using var mutex = new Mutex(initiallyOwned: false, mutexName);
         bool acquired = false;
         try
         {
@@ -405,9 +416,9 @@ public sealed class JsonLineAuditLog : IAuditLog
         }
     }
 
-    private static void WithMutex(CancellationToken cancellationToken, Action action)
+    private void WithMutex(CancellationToken cancellationToken, Action action)
     {
-        using var mutex = new Mutex(initiallyOwned: false, MutexName);
+        using var mutex = new Mutex(initiallyOwned: false, mutexName);
         bool acquired = false;
         try
         {

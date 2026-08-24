@@ -226,7 +226,7 @@ public sealed class JsonLineAuditLogTests
     {
         using var temp = new TemporaryDirectory();
         IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
-        await using var heldMutex = new HeldAuditMutex();
+        await using var heldMutex = new HeldAuditMutex(temp.Path);
         using var cancellation = new CancellationTokenSource();
 
         Task<int> count = log.CountAllowedAsync(
@@ -322,7 +322,7 @@ public sealed class JsonLineAuditLogTests
         await File.WriteAllLinesAsync(file, [privacy, detailed]);
         byte[] original = await File.ReadAllBytesAsync(file);
         IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
-        await using var heldMutex = new HeldAuditMutex();
+        await using var heldMutex = new HeldAuditMutex(temp.Path);
         using var cancellation = new CancellationTokenSource();
 
         Task deletion = log.DeleteDetailedAsync(cancellation.Token);
@@ -404,7 +404,7 @@ public sealed class JsonLineAuditLogTests
         IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
         Task clear;
 
-        await using (var heldMutex = new HeldAuditMutex())
+        await using (var heldMutex = new HeldAuditMutex(temp.Path))
         {
             clear = log.ClearAsync(CancellationToken.None);
             await Task.Delay(TimeSpan.FromMilliseconds(100));
@@ -426,7 +426,7 @@ public sealed class JsonLineAuditLogTests
         IAuditLog log = CreateLog(temp.Path, AuditDetailLevel.PrivacySafe);
         Task deletion;
 
-        await using (var heldMutex = new HeldAuditMutex())
+        await using (var heldMutex = new HeldAuditMutex(temp.Path))
         {
             deletion = log.DeleteExpiredAsync(7, CancellationToken.None);
             await Task.Delay(TimeSpan.FromMilliseconds(100));
@@ -447,7 +447,7 @@ public sealed class JsonLineAuditLogTests
             ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow), CancellationToken.None);
         Task<IReadOnlyList<AuditRecord>> read;
 
-        await using (var heldMutex = new HeldAuditMutex())
+        await using (var heldMutex = new HeldAuditMutex(temp.Path))
         {
             read = log.ReadRecentAsync(1, CancellationToken.None);
             await Task.Delay(TimeSpan.FromMilliseconds(100));
@@ -458,6 +458,24 @@ public sealed class JsonLineAuditLogTests
     }
 
     [Fact]
+    public async Task WriteAsync_WhenDifferentDataRootMutexIsHeld_WritesRecord()
+    {
+        using var blockedRoot = new TemporaryDirectory();
+        using var writableRoot = new TemporaryDirectory();
+        await using var heldMutex = new HeldAuditMutex(blockedRoot.Path);
+        IAuditLog log = CreateLog(writableRoot.Path, AuditDetailLevel.Detailed);
+
+        await log.WriteAsync(
+            CreateSecretRequest(Guid.NewGuid()),
+            ApprovalDecision.Allow(DecisionSource.LocalAlwaysAllow),
+            CancellationToken.None);
+
+        Assert.NotEmpty(Directory.EnumerateFiles(
+            Path.Combine(writableRoot.Path, "logs"),
+            "audit-*.jsonl"));
+    }
+
+    [Fact]
     public async Task WriteAsync_WhenMutexIsUnavailable_DiscardsRecordWithinShortTimeout()
     {
         using var temp = new TemporaryDirectory();
@@ -465,7 +483,7 @@ public sealed class JsonLineAuditLogTests
         using var releaseMutex = new ManualResetEventSlim();
         Task holder = Task.Run(() =>
         {
-            using var mutex = new Mutex(false, @"Local\CCAutoApprove.AuditLog");
+            using var mutex = new Mutex(false, AuditMutexName(temp.Path));
             Assert.True(mutex.WaitOne(TimeSpan.FromSeconds(1)));
             try
             {
@@ -506,6 +524,9 @@ public sealed class JsonLineAuditLogTests
             new AppPaths(basePath),
             new PersistentSettings(AuditDetailLevel: level),
             clock ?? new StubClock(FixedUtc));
+
+    private static string AuditMutexName(string basePath) =>
+        JsonLineAuditLog.CreateMutexName(Path.Combine(basePath, "logs"));
 
     private static ApprovalRequest CreateSecretRequest(Guid requestId)
     {
@@ -560,12 +581,12 @@ public sealed class JsonLineAuditLogTests
         private readonly ManualResetEventSlim release = new();
         private readonly Task holder;
 
-        public HeldAuditMutex()
+        public HeldAuditMutex(string basePath)
         {
             using var acquired = new ManualResetEventSlim();
             holder = Task.Run(() =>
             {
-                using var mutex = new Mutex(false, @"Local\CCAutoApprove.AuditLog");
+                using var mutex = new Mutex(false, AuditMutexName(basePath));
                 Assert.True(mutex.WaitOne(TimeSpan.FromSeconds(1)));
                 try
                 {
