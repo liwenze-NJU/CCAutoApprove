@@ -231,8 +231,79 @@ public sealed class ClaudeHookManagerTests
         }
     }
 
+    [Theory]
+    [InlineData(OwnedMutation.Commit)]
+    [InlineData(OwnedMutation.Restore)]
+    [InlineData(OwnedMutation.Delete)]
+    public async Task SnapshotCommitter_AfterComparison_BlocksInPlaceWriterThroughOwnedMutation(
+        OwnedMutation mutation)
+    {
+        using var temp = new TemporaryDirectory();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        string settingsPath = Path.Combine(temp.Path, "settings.json");
+        byte[] expectedSource;
+        if (mutation == OwnedMutation.Commit)
+        {
+            await File.WriteAllTextAsync(settingsPath, ExistingSettings, timeout.Token);
+            expectedSource = await File.ReadAllBytesAsync(settingsPath, timeout.Token);
+        }
+        else
+        {
+            expectedSource = Encoding.UTF8.GetBytes("{\"attempt\":true}");
+            await File.WriteAllBytesAsync(settingsPath, expectedSource, timeout.Token);
+        }
+
+        byte[] externalEdit = Encoding.UTF8.GetBytes("{\"externalEdit\":\"in-place\"}");
+        var comparisonGate = new AfterComparisonGate();
+        var committer = new SnapshotClaudeSettingsCommitter(
+            writer: null,
+            new SystemClaudeSettingsFileOperations(comparisonGate.PauseAsync));
+        var firstExternalAttempt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<bool> ownedMutation = mutation switch
+        {
+            OwnedMutation.Commit => committer.TryCommitAsync(
+                settingsPath,
+                expectedSource,
+                "{\"replacement\":true}",
+                timeout.Token),
+            OwnedMutation.Restore => committer.TryCommitBytesAsync(
+                settingsPath,
+                expectedSource,
+                Encoding.UTF8.GetBytes(ExistingSettings),
+                timeout.Token),
+            OwnedMutation.Delete => committer.TryDeleteAsync(
+                settingsPath,
+                expectedSource,
+                timeout.Token),
+            _ => throw new InvalidOperationException($"Unknown mutation: {mutation}.")
+        };
+
+        try
+        {
+            await comparisonGate.ComparisonCompleted.Task.WaitAsync(timeout.Token);
+            Task<bool> externalWrite = WriteExternalBytesWithRetryAsync(
+                settingsPath,
+                externalEdit,
+                firstExternalAttempt,
+                timeout.Token);
+            await firstExternalAttempt.Task.WaitAsync(timeout.Token);
+            Assert.False(ownedMutation.IsCompleted);
+
+            comparisonGate.Release.SetResult();
+
+            Assert.True(await ownedMutation.WaitAsync(timeout.Token));
+            Assert.True(await externalWrite.WaitAsync(timeout.Token));
+            Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath, timeout.Token));
+        }
+        finally
+        {
+            comparisonGate.Release.TrySetResult();
+        }
+    }
+
     [Fact]
-    public async Task SnapshotCommitter_AfterComparison_HoldsOwnershipThroughReplacement()
+    public async Task SnapshotCommitter_AfterComparison_BlocksSiblingAtomicReplacementThroughCommit()
     {
         using var temp = new TemporaryDirectory();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -254,7 +325,7 @@ public sealed class ClaudeHookManagerTests
         try
         {
             await comparisonGate.ComparisonCompleted.Task.WaitAsync(timeout.Token);
-            Task<bool> externalWrite = WriteExternalBytesWithRetryAsync(
+            Task<ExternalAtomicWriteResult> externalWrite = ReplaceExternallyFromSiblingWithRetryAsync(
                 settingsPath,
                 externalEdit,
                 firstExternalAttempt,
@@ -265,8 +336,10 @@ public sealed class ClaudeHookManagerTests
             comparisonGate.Release.SetResult();
 
             Assert.True(await commit.WaitAsync(timeout.Token));
-            Assert.True(await externalWrite.WaitAsync(timeout.Token));
+            ExternalAtomicWriteResult externalResult = await externalWrite.WaitAsync(timeout.Token);
+            Assert.True(externalResult.Committed);
             Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath, timeout.Token));
+            Assert.True(externalResult.ConflictObserved);
         }
         finally
         {
@@ -275,7 +348,7 @@ public sealed class ClaudeHookManagerTests
     }
 
     [Fact]
-    public async Task SnapshotCommitter_RestoreAfterComparison_HoldsOwnershipThroughReplacement()
+    public async Task SnapshotCommitter_RestoreAfterComparison_BlocksSiblingAtomicReplacementThroughRestore()
     {
         using var temp = new TemporaryDirectory();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -299,7 +372,7 @@ public sealed class ClaudeHookManagerTests
         try
         {
             await comparisonGate.ComparisonCompleted.Task.WaitAsync(timeout.Token);
-            Task<bool> externalWrite = WriteExternalBytesWithRetryAsync(
+            Task<ExternalAtomicWriteResult> externalWrite = ReplaceExternallyFromSiblingWithRetryAsync(
                 settingsPath,
                 externalEdit,
                 firstExternalAttempt,
@@ -310,8 +383,10 @@ public sealed class ClaudeHookManagerTests
             comparisonGate.Release.SetResult();
 
             Assert.True(await restore.WaitAsync(timeout.Token));
-            Assert.True(await externalWrite.WaitAsync(timeout.Token));
+            ExternalAtomicWriteResult externalResult = await externalWrite.WaitAsync(timeout.Token);
+            Assert.True(externalResult.Committed);
             Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath, timeout.Token));
+            Assert.True(externalResult.ConflictObserved);
         }
         finally
         {
@@ -320,7 +395,7 @@ public sealed class ClaudeHookManagerTests
     }
 
     [Fact]
-    public async Task SnapshotCommitter_DeleteAfterComparison_HoldsOwnershipThroughDeletion()
+    public async Task SnapshotCommitter_DeleteAfterComparison_BlocksSiblingAtomicReplacementThroughDeletion()
     {
         using var temp = new TemporaryDirectory();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -342,7 +417,7 @@ public sealed class ClaudeHookManagerTests
         try
         {
             await comparisonGate.ComparisonCompleted.Task.WaitAsync(timeout.Token);
-            Task<bool> externalWrite = WriteExternalBytesWithRetryAsync(
+            Task<ExternalAtomicWriteResult> externalWrite = ReplaceExternallyFromSiblingWithRetryAsync(
                 settingsPath,
                 externalEdit,
                 firstExternalAttempt,
@@ -353,12 +428,129 @@ public sealed class ClaudeHookManagerTests
             comparisonGate.Release.SetResult();
 
             Assert.True(await delete.WaitAsync(timeout.Token));
-            Assert.True(await externalWrite.WaitAsync(timeout.Token));
+            ExternalAtomicWriteResult externalResult = await externalWrite.WaitAsync(timeout.Token);
+            Assert.True(externalResult.Committed);
             Assert.Equal(externalEdit, await File.ReadAllBytesAsync(settingsPath, timeout.Token));
+            Assert.True(externalResult.ConflictObserved);
         }
         finally
         {
             comparisonGate.Release.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task SnapshotCommitter_DeleteWhenSiblingReplacementWinsAfterLeaseRelease_RestoresExternalBytesAndDeclinesDelete()
+    {
+        using var temp = new TemporaryDirectory();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        string settingsPath = Path.Combine(temp.Path, "settings.json");
+        string externalPath = Path.Combine(temp.Path, "settings.external.tmp");
+        byte[] attemptBytes = Encoding.UTF8.GetBytes("{\"attempt\":true}");
+        byte[] externalBytes = Encoding.UTF8.GetBytes("{\"external\":\"committed\"}");
+        await File.WriteAllBytesAsync(settingsPath, attemptBytes, timeout.Token);
+        await File.WriteAllBytesAsync(externalPath, externalBytes, timeout.Token);
+        var releaseGate = new AfterDeleteOwnershipReleasedGate();
+        var committer = new SnapshotClaudeSettingsCommitter(
+            writer: null,
+            new SystemClaudeSettingsFileOperations(
+                afterComparison: null,
+                afterTruncation: null,
+                afterDeleteOwnershipReleased: releaseGate.PauseAsync));
+
+        Task<bool> delete = committer.TryDeleteAsync(
+            settingsPath,
+            attemptBytes,
+            timeout.Token);
+        try
+        {
+            await releaseGate.OwnershipReleased.Task.WaitAsync(timeout.Token);
+            File.Replace(externalPath, settingsPath, destinationBackupFileName: null);
+            releaseGate.Release.SetResult();
+
+            Assert.False(await delete.WaitAsync(timeout.Token));
+            Assert.Equal(externalBytes, await File.ReadAllBytesAsync(settingsPath, timeout.Token));
+            Assert.Empty(Directory.EnumerateFiles(
+                temp.Path,
+                "*.ccautoapprove-delete-quarantine"));
+        }
+        finally
+        {
+            releaseGate.Release.TrySetResult();
+            if (File.Exists(externalPath))
+            {
+                File.Delete(externalPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SnapshotCommitter_WhenOwnedRewriteThrowsAfterTruncation_RestoresExactOriginalBytes()
+    {
+        using var temp = new TemporaryDirectory();
+        string settingsPath = Path.Combine(temp.Path, "settings.json");
+        byte[] original = [0xEF, 0xBB, 0xBF, 0x00, 0x7B, 0x7D, 0x0A];
+        await File.WriteAllBytesAsync(settingsPath, original);
+        var committer = new SnapshotClaudeSettingsCommitter(
+            writer: null,
+            new SystemClaudeSettingsFileOperations(
+                afterComparison: null,
+                afterTruncation: _ => throw new IOException("injected rewrite failure")));
+
+        IOException exception = await Assert.ThrowsAsync<IOException>(() =>
+            committer.TryCommitAsync(
+                settingsPath,
+                original,
+                "{\"replacement\":true}",
+                CancellationToken.None));
+
+        Assert.Equal("injected rewrite failure", exception.Message);
+        Assert.Equal(original, await File.ReadAllBytesAsync(settingsPath));
+    }
+
+    [Fact]
+    public async Task SnapshotCommitter_DuringOwnedRewrite_BlocksReadersUntilComplete()
+    {
+        using var temp = new TemporaryDirectory();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        string settingsPath = await WriteSettingsAsync(temp, ExistingSettings);
+        byte[] original = await File.ReadAllBytesAsync(settingsPath, timeout.Token);
+        const string replacement = "{\"replacement\":\"complete\"}";
+        byte[] replacementBytes = Encoding.UTF8.GetBytes(replacement);
+        var truncationGate = new AfterTruncationGate();
+        var committer = new SnapshotClaudeSettingsCommitter(
+            writer: null,
+            new SystemClaudeSettingsFileOperations(
+                afterComparison: null,
+                afterTruncation: truncationGate.PauseAsync));
+        var firstReadAttempt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Task<bool> commit = committer.TryCommitAsync(
+            settingsPath,
+            original,
+            replacement,
+            timeout.Token);
+        try
+        {
+            await truncationGate.TruncationCompleted.Task.WaitAsync(timeout.Token);
+            Task<ExternalReadResult> read = ReadExternallyWithRetryAsync(
+                settingsPath,
+                firstReadAttempt,
+                timeout.Token);
+            await firstReadAttempt.Task.WaitAsync(timeout.Token);
+            Assert.False(commit.IsCompleted);
+
+            truncationGate.Release.SetResult();
+
+            Assert.True(await commit.WaitAsync(timeout.Token));
+            ExternalReadResult readResult = await read.WaitAsync(timeout.Token);
+            Assert.True(readResult.ConflictObserved);
+            Assert.Equal(replacementBytes, readResult.Bytes);
+        }
+        finally
+        {
+            truncationGate.Release.TrySetResult();
         }
     }
 
@@ -700,6 +892,13 @@ public sealed class ClaudeHookManagerTests
         return path;
     }
 
+    public enum OwnedMutation
+    {
+        Commit,
+        Restore,
+        Delete
+    }
+
     private static async Task<bool> WriteExternalBytesWithRetryAsync(
         string settingsPath,
         byte[] bytes,
@@ -726,6 +925,127 @@ public sealed class ClaudeHookManagerTests
                 ownershipBoundaryObserved = true;
                 firstAttemptCompleted.TrySetResult();
                 await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+            }
+        }
+    }
+
+    private sealed record ExternalReadResult(bool ConflictObserved, byte[] Bytes);
+
+    private static async Task<ExternalReadResult> ReadExternallyWithRetryAsync(
+        string settingsPath,
+        TaskCompletionSource firstAttemptCompleted,
+        CancellationToken cancellationToken)
+    {
+        bool conflictObserved = false;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await using var source = new FileStream(
+                    settingsPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    bufferSize: 4096,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                using var bytes = new MemoryStream();
+                await source.CopyToAsync(bytes, cancellationToken);
+                firstAttemptCompleted.TrySetResult();
+                return new ExternalReadResult(conflictObserved, bytes.ToArray());
+            }
+            catch (IOException)
+            {
+                conflictObserved = true;
+                firstAttemptCompleted.TrySetResult();
+                await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                conflictObserved = true;
+                firstAttemptCompleted.TrySetResult();
+                await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+            }
+        }
+    }
+
+    private sealed class AfterDeleteOwnershipReleasedGate
+    {
+        public TaskCompletionSource OwnershipReleased { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task PauseAsync(CancellationToken cancellationToken)
+        {
+            OwnershipReleased.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed class AfterTruncationGate
+    {
+        public TaskCompletionSource TruncationCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task PauseAsync(CancellationToken cancellationToken)
+        {
+            TruncationCompleted.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed record ExternalAtomicWriteResult(bool ConflictObserved, bool Committed);
+
+    private static async Task<ExternalAtomicWriteResult> ReplaceExternallyFromSiblingWithRetryAsync(
+        string settingsPath,
+        byte[] bytes,
+        TaskCompletionSource firstAttemptCompleted,
+        CancellationToken cancellationToken)
+    {
+        string preparedPath = $"{settingsPath}.{Guid.NewGuid():N}.external-replacement.tmp";
+        await File.WriteAllBytesAsync(preparedPath, bytes, cancellationToken);
+        bool ownershipBoundaryObserved = false;
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    if (File.Exists(settingsPath))
+                    {
+                        File.Replace(preparedPath, settingsPath, destinationBackupFileName: null);
+                    }
+                    else
+                    {
+                        File.Move(preparedPath, settingsPath, overwrite: false);
+                    }
+
+                    firstAttemptCompleted.TrySetResult();
+                    return new ExternalAtomicWriteResult(ownershipBoundaryObserved, Committed: true);
+                }
+                catch (IOException)
+                {
+                    ownershipBoundaryObserved = true;
+                    firstAttemptCompleted.TrySetResult();
+                    await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    ownershipBoundaryObserved = true;
+                    firstAttemptCompleted.TrySetResult();
+                    await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken);
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(preparedPath))
+            {
+                File.Delete(preparedPath);
             }
         }
     }
