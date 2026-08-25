@@ -171,7 +171,6 @@ public sealed class AppController
             }
             catch
             {
-                Task disableTask = heartbeatService.DisableAndStopAsync();
                 lock (stateLock)
                 {
                     selectedProject = project;
@@ -179,6 +178,7 @@ public sealed class AppController
                     errorCode = HeartbeatWriteFailed;
                 }
                 raiseStateChanged = true;
+                Task disableTask = heartbeatService.DisableAndStopAsync();
 
                 try
                 {
