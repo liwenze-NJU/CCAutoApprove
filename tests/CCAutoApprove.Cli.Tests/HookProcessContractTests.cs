@@ -288,9 +288,23 @@ public sealed class HookProcessContractTests
 
             try
             {
-                await process.StandardInput.BaseStream.WriteAsync(standardInput);
-                await process.StandardInput.BaseStream.FlushAsync();
-                process.StandardInput.Close();
+                try
+                {
+                    await process.StandardInput.BaseStream.WriteAsync(standardInput);
+                    await process.StandardInput.BaseStream.FlushAsync();
+                }
+                catch (IOException)
+                {
+                    // Some fail-closed paths intentionally exit before reading stdin.
+                    // Only tolerate the resulting closed pipe after confirming that
+                    // the child process really has exited.
+                    using var exitConfirmation = new CancellationTokenSource(ProcessTimeout);
+                    await process.WaitForExitAsync(exitConfirmation.Token);
+                }
+                finally
+                {
+                    process.StandardInput.Close();
+                }
 
                 using var timeout = new CancellationTokenSource(ProcessTimeout);
                 await process.WaitForExitAsync(timeout.Token);
