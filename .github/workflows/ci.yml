@@ -24,3 +24,10 @@ jobs:
         run: choco install innosetup -y --no-progress
       - shell: pwsh
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.1.0 installer/CCAutoApprove.iss'
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCAutoApprove-Windows-Installer-${{ github.sha }}
+          path: artifacts/installer/CCAutoApprove-Setup-0.1.0.exe
+          if-no-files-found: error
+          retention-days: 14
