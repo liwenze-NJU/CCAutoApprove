@@ -40,9 +40,9 @@
                 <TextBlock Text="{DynamicResource PermissionModeLabel}" FontWeight="SemiBold" />
                 <TextBlock Text="{Binding SelectedPermissionMode}" TextWrapping="Wrap" Margin="0,2,0,8" />
                 <TextBlock Text="{DynamicResource ToolInputLabel}" FontWeight="SemiBold" />
-                <TextBox Text="{Binding SelectedToolInput}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,8" />
+                <TextBox Text="{Binding SelectedToolInput, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,8" />
                 <TextBlock Text="{DynamicResource PermissionSuggestionsLabel}" FontWeight="SemiBold" />
-                <TextBox Text="{Binding SelectedPermissionSuggestions}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,0" />
+                <TextBox Text="{Binding SelectedPermissionSuggestions, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,0" />
             </StackPanel>
         </ScrollViewer>
     </Grid>

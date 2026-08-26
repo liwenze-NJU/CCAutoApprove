@@ -235,7 +235,10 @@ public sealed class StatusViewModelTests
         var viewModel = new StatusViewModel(environment.Controller, maintenance);
 
         await viewModel.InstallHookCommand.ExecuteAsync();
+        Assert.Equal(StringResources.Get("HookInstallSucceeded"), viewModel.OperationMessage);
+
         await viewModel.DoctorCommand.ExecuteAsync();
+        Assert.Equal(StringResources.Get("HookDoctorHealthy"), viewModel.OperationMessage);
 
         Assert.Equal(1, maintenance.InstallCalls);
         Assert.Equal(1, maintenance.DoctorCalls);
@@ -267,7 +270,7 @@ public sealed class StatusViewModelTests
     public async Task RefreshCommand_RefreshesHookHealthAndTodayApprovalCountTogether()
     {
         await using var environment = await ViewModelEnvironment.CreateAsync();
-        var maintenance = new PublishingHookMaintenanceService(initialOperational: false);
+        var maintenance = new PublishingHookMaintenanceService(initialOperational: true);
         int countCalls = 0;
         var viewModel = new StatusViewModel(
             environment.Controller,
@@ -282,6 +285,7 @@ public sealed class StatusViewModelTests
 
         Assert.Equal(1, maintenance.RefreshCalls);
         Assert.Equal(1, countCalls);
+        Assert.Equal(StringResources.Get("OperationCompleted"), viewModel.OperationMessage);
         Assert.Equal(
             string.Format(StringResources.Get("TodayApprovalCountFormat"), 17),
             viewModel.TodayApprovalCountText);

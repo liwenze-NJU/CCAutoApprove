@@ -13,6 +13,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private readonly SynchronizationContext? synchronizationContext;
     private string selectedProject;
     private string? errorMessage;
+    private string? operationMessage;
     private bool isEnabled;
     private string hookHealthText;
     private bool? hookOperational;
@@ -94,6 +95,12 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         private set => SetProperty(ref errorMessage, value);
     }
 
+    public string? OperationMessage
+    {
+        get => operationMessage;
+        private set => SetProperty(ref operationMessage, value);
+    }
+
     public string ToggleButtonText => IsEnabled
         ? StringResources.Get("PauseApproval")
         : StringResources.Get("EnableApproval");
@@ -162,6 +169,7 @@ public sealed class StatusViewModel : INotifyPropertyChanged
     private async Task ToggleApprovalAsync()
     {
         ErrorMessage = null;
+        OperationMessage = null;
         if (controller.IsEnabled)
         {
             await controller.PauseAsync(CancellationToken.None);
@@ -181,33 +189,56 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         }
 
         ErrorMessage = null;
+        OperationMessage = null;
         HookOperationResult result = await operation(hookMaintenanceService);
-        if (result.Outcome is HookOperationOutcome.Unhealthy or HookOperationOutcome.Failed)
+        if (result.Outcome == HookOperationOutcome.Unhealthy)
         {
-            ErrorMessage = result.Outcome == HookOperationOutcome.Unhealthy
-                ? HookDiagnosticMessageFormatter.Format(result.Checks)
-                : StringResources.Get("ErrorOperationFailed");
+            ErrorMessage = HookDiagnosticMessageFormatter.Format(result.Checks);
+            return;
         }
+
+        OperationMessage = result.Outcome switch
+        {
+            HookOperationOutcome.Installed => StringResources.Get("HookInstallSucceeded"),
+            HookOperationOutcome.Uninstalled => StringResources.Get("HookUninstallSucceeded"),
+            HookOperationOutcome.Healthy => StringResources.Get("HookDoctorHealthy"),
+            _ => null
+        };
+        ErrorMessage = result.Outcome == HookOperationOutcome.Failed
+            ? StringResources.Get("ErrorOperationFailed")
+            : null;
     }
 
     private async Task RefreshStatusAsync(CancellationToken cancellationToken)
     {
         ErrorMessage = null;
+        OperationMessage = null;
+        HookHealthSnapshot? snapshot = null;
         if (hookMaintenanceService is not null)
         {
-            await hookMaintenanceService.RefreshAsync(cancellationToken);
+            snapshot = await hookMaintenanceService.RefreshAsync(cancellationToken);
         }
 
         await RefreshTodayCountAsync(cancellationToken);
+        if (snapshot?.IsOperational == false)
+        {
+            ErrorMessage = HookDiagnosticMessageFormatter.Format(snapshot.Checks);
+            return;
+        }
+
+        OperationMessage = StringResources.Get("OperationCompleted");
     }
 
     private Task HandleCommandErrorAsync(Exception exception)
     {
         RunOnCapturedContext(() =>
+        {
+            OperationMessage = null;
             ErrorMessage = GetErrorMessage(GetEffectiveControllerErrorCode(
                     controller.ErrorCode,
                     hookErrorResolvedByLaterHealth))
-                ?? StringResources.Get("ErrorOperationFailed"));
+                ?? StringResources.Get("ErrorOperationFailed");
+        });
         return Task.CompletedTask;
     }
 
