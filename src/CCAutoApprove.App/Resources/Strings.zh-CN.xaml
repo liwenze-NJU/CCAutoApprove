@@ -76,6 +76,7 @@
     <sys:String x:Key="ErrorSelectedProjectRequired">请先选择项目。</sys:String>
     <sys:String x:Key="ErrorSelectedProjectNotFound">所选项目不存在。</sys:String>
     <sys:String x:Key="ErrorHookNotOperational">Hook 状态异常，请先运行检查。</sys:String>
+    <sys:String x:Key="HookDiagnosticFailureFormat">Hook &#x68C0;&#x67E5;&#x5931;&#x8D25; [{0}]&#xFF1A;{1}</sys:String>
     <sys:String x:Key="ErrorHeartbeatWriteFailed">心跳写入失败，自动批准已暂停。</sys:String>
     <sys:String x:Key="ErrorOperationFailed">操作失败，请重试。</sys:String>
     <sys:String x:Key="ErrorRecordsOperationFailed">读取或更新记录失败，请重试。</sys:String>

@@ -3,6 +3,7 @@ using CCAutoApprove.App;
 using CCAutoApprove.App.Services;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
+using CCAutoApprove.Infrastructure.Claude;
 
 namespace CCAutoApprove.App.Tests.ViewModels;
 
@@ -447,10 +448,14 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task InstallHookCommand_WhenStructuredDoctorIsUnhealthy_ShowsLocalizedFailureNotCompleted()
+    public async Task InstallHookCommand_WhenStructuredDoctorIsUnhealthy_ShowsFirstFailedCheckNotCompleted()
     {
+        var failedCheck = new DoctorCheck(
+            "ClaudeStructuredDecisionSupported",
+            DoctorSeverity.Error,
+            "Claude Code compatibility could not be verified.");
         var maintenance = new FakeHookMaintenanceService(
-            new HookOperationResult(HookOperationOutcome.Unhealthy, false, []));
+            new HookOperationResult(HookOperationOutcome.Unhealthy, false, [failedCheck]));
         var viewModel = new SettingsViewModel(
             new FakeSettingsStore(new PersistentSettings()),
             new FakeAuditLog(),
@@ -459,7 +464,9 @@ public sealed class SettingsViewModelTests
 
         await viewModel.InstallHookCommand.ExecuteAsync();
 
-        Assert.Equal(StringResources.Get("ErrorHookNotOperational"), viewModel.OperationMessage);
+        Assert.Equal(
+            "Hook 检查失败 [ClaudeStructuredDecisionSupported]：Claude Code compatibility could not be verified.",
+            viewModel.OperationMessage);
         Assert.NotEqual(StringResources.Get("OperationCompleted"), viewModel.OperationMessage);
         Assert.Equal(1, maintenance.InstallCalls);
     }

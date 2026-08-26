@@ -184,9 +184,9 @@ public sealed class StatusViewModel : INotifyPropertyChanged
         HookOperationResult result = await operation(hookMaintenanceService);
         if (result.Outcome is HookOperationOutcome.Unhealthy or HookOperationOutcome.Failed)
         {
-            ErrorMessage = StringResources.Get(result.Outcome == HookOperationOutcome.Unhealthy
-                ? "ErrorHookNotOperational"
-                : "ErrorOperationFailed");
+            ErrorMessage = result.Outcome == HookOperationOutcome.Unhealthy
+                ? HookDiagnosticMessageFormatter.Format(result.Checks)
+                : StringResources.Get("ErrorOperationFailed");
         }
     }
 

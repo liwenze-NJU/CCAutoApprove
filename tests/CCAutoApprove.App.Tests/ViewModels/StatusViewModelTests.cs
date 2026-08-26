@@ -5,6 +5,7 @@ using CCAutoApprove.App.Tests.Services;
 using CCAutoApprove.App.ViewModels;
 using CCAutoApprove.Core.Abstractions;
 using CCAutoApprove.Core.Models;
+using CCAutoApprove.Infrastructure.Claude;
 
 namespace CCAutoApprove.App.Tests.ViewModels;
 
@@ -242,6 +243,27 @@ public sealed class StatusViewModelTests
     }
 
     [Fact]
+    public async Task DoctorCommand_WhenUnhealthy_ShowsFirstFailedCheck()
+    {
+        await using var environment = await ViewModelEnvironment.CreateAsync();
+        var failedCheck = new DoctorCheck(
+            "ClaudeStructuredDecisionSupported",
+            DoctorSeverity.Error,
+            "Claude Code compatibility could not be verified.");
+        var result = new HookOperationResult(HookOperationOutcome.Unhealthy, false, [failedCheck]);
+        var maintenance = new PublishingHookMaintenanceService(
+            initialOperational: false,
+            operationResult: result);
+        var viewModel = new StatusViewModel(environment.Controller, maintenance);
+
+        await viewModel.DoctorCommand.ExecuteAsync();
+
+        Assert.Equal(
+            "Hook 检查失败 [ClaudeStructuredDecisionSupported]：Claude Code compatibility could not be verified.",
+            viewModel.ErrorMessage);
+    }
+
+    [Fact]
     public async Task RefreshCommand_RefreshesHookHealthAndTodayApprovalCountTogether()
     {
         await using var environment = await ViewModelEnvironment.CreateAsync();
@@ -383,7 +405,9 @@ public sealed class StatusViewModelTests
         public Task<bool> IsOperationalAsync(CancellationToken cancellationToken) => Task.FromResult(operational);
     }
 
-    private sealed class PublishingHookMaintenanceService(bool initialOperational)
+    private sealed class PublishingHookMaintenanceService(
+        bool initialOperational,
+        HookOperationResult? operationResult = null)
         : IHookMaintenanceService
     {
         public event EventHandler<HookHealthSnapshot>? HealthChanged;
@@ -395,6 +419,12 @@ public sealed class StatusViewModelTests
         public Task<HookOperationResult> InstallAsync(CancellationToken cancellationToken)
         {
             InstallCalls++;
+            if (operationResult is not null)
+            {
+                Publish(operationResult.IsOperational);
+                return Task.FromResult(operationResult);
+            }
+
             Publish(true);
             return Task.FromResult(new HookOperationResult(HookOperationOutcome.Installed, true, []));
         }
@@ -402,6 +432,12 @@ public sealed class StatusViewModelTests
         public Task<HookOperationResult> DoctorAsync(CancellationToken cancellationToken)
         {
             DoctorCalls++;
+            if (operationResult is not null)
+            {
+                Publish(operationResult.IsOperational);
+                return Task.FromResult(operationResult);
+            }
+
             Publish(true);
             return Task.FromResult(new HookOperationResult(HookOperationOutcome.Healthy, true, []));
         }

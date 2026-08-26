@@ -307,14 +307,15 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         {
             OperationMessage = null;
             HookOperationResult result = await operation(CancellationToken.None);
-            OperationMessage = StringResources.Get(result.Outcome switch
-            {
-                HookOperationOutcome.Installed => "HookInstallSucceeded",
-                HookOperationOutcome.Uninstalled => "HookUninstallSucceeded",
-                HookOperationOutcome.Healthy => "HookDoctorHealthy",
-                HookOperationOutcome.Unhealthy => "ErrorHookNotOperational",
-                _ => "ErrorOperationFailed"
-            });
+            OperationMessage = result.Outcome == HookOperationOutcome.Unhealthy
+                ? HookDiagnosticMessageFormatter.Format(result.Checks)
+                : StringResources.Get(result.Outcome switch
+                {
+                    HookOperationOutcome.Installed => "HookInstallSucceeded",
+                    HookOperationOutcome.Uninstalled => "HookUninstallSucceeded",
+                    HookOperationOutcome.Healthy => "HookDoctorHealthy",
+                    _ => "ErrorOperationFailed"
+                });
         }, HandleErrorAsync);
 
     private Task HandleErrorAsync(Exception exception)

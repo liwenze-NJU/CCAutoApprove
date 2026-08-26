@@ -59,6 +59,23 @@ public sealed class ClaudeVersionCapabilityProbeTests
         Assert.Null(capability.Version);
     }
 
+    [Fact]
+    public async Task Runner_ExecutesCmdFromPathContainingSpaces()
+    {
+        using var temp = new TemporaryDirectory();
+        string directory = Path.Combine(temp.Path, "npm commands");
+        Directory.CreateDirectory(directory);
+        string command = Path.Combine(directory, "claude.cmd");
+        File.WriteAllText(command, "@echo off\r\necho 2.1.201 (Claude Code)\r\n");
+        var runner = new ProcessClaudeVersionCommandRunner();
+
+        ClaudeVersionCommandResult result =
+            await runner.RunAsync(command, CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("2.1.201 (Claude Code)", result.Output, StringComparison.Ordinal);
+    }
+
     private sealed class StubLocator(params string[] candidates) : IClaudeExecutableLocator
     {
         public IReadOnlyList<string> FindCandidates() => candidates;

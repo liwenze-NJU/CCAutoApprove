@@ -253,10 +253,7 @@ internal sealed class ProcessClaudeVersionCommandRunner : IClaudeVersionCommandR
         };
         if (isCommandScript)
         {
-            startInfo.ArgumentList.Add("/d");
-            startInfo.ArgumentList.Add("/s");
-            startInfo.ArgumentList.Add("/c");
-            startInfo.ArgumentList.Add($"\"\"{executablePath}\" --version\"");
+            startInfo.Arguments = $"/d /s /c \"\"{executablePath}\" --version\"";
         }
         else
         {
