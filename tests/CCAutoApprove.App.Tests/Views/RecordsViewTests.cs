@@ -1,5 +1,4 @@
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Threading;
 using CCAutoApprove.App.ViewModels;
 using CCAutoApprove.App.Views;
@@ -16,14 +15,11 @@ public sealed class RecordsViewTests
         {
             try
             {
-                var application = new Application();
-                application.Resources["BooleanToVisibilityConverter"] = new BooleanToVisibilityConverter();
                 var view = new RecordsView { DataContext = new RecordsViewModel() };
                 view.Measure(new Size(980, 640));
                 view.Arrange(new Rect(0, 0, 980, 640));
                 view.UpdateLayout();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
-                application.Shutdown();
             }
             catch (Exception exception)
             {
