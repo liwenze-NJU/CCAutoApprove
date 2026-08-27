@@ -1,0 +1,144 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-test-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and source branch
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$') {
+            throw "Release tag '$env:RELEASE_TAG' must use the stable SemVer form vMAJOR.MINOR.PATCH."
+          }
+
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not fetch origin/main."
+          }
+
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag '$env:RELEASE_TAG' does not point to a commit contained in main."
+          }
+
+          $version = $Matches.version
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "installer=artifacts/installer/CCAutoApprove-Setup-$version.exe" >> $env:GITHUB_OUTPUT
+          "checksum=artifacts/installer/CCAutoApprove-Setup-$version.exe.sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore CCAutoApprove.sln
+
+      - name: Build release configuration
+        run: dotnet build CCAutoApprove.sln -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test CCAutoApprove.sln -c Release --no-build --logger "trx;LogFileName=tests.trx" -m:1 -- xUnit.ParallelizeTestCollections=false
+
+      - name: Publish self-contained applications
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: ./scripts/publish.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          INSTALLER_PATH: ${{ steps.release.outputs.installer }}
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Inno Setup compiler was not found at '$compiler'."
+          }
+
+          & $compiler "/DAppVersion=$env:RELEASE_VERSION" "installer/CCAutoApprove.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+          if (-not (Test-Path -LiteralPath $env:INSTALLER_PATH -PathType Leaf)) {
+            throw "Expected installer was not created at '$env:INSTALLER_PATH'."
+          }
+
+      - name: Create SHA-256 checksum
+        env:
+          INSTALLER_PATH: ${{ steps.release.outputs.installer }}
+          CHECKSUM_PATH: ${{ steps.release.outputs.checksum }}
+        run: |
+          $hash = (Get-FileHash -LiteralPath $env:INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          $fileName = Split-Path -Leaf $env:INSTALLER_PATH
+          "$hash  $fileName" | Set-Content -LiteralPath $env:CHECKSUM_PATH -Encoding utf8NoBOM
+
+      - name: Upload release candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CCAutoApprove-Release-${{ github.ref_name }}
+          path: |
+            ${{ steps.release.outputs.installer }}
+            ${{ steps.release.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or update draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          INSTALLER_PATH: ${{ steps.release.outputs.installer }}
+          CHECKSUM_PATH: ${{ steps.release.outputs.checksum }}
+        run: |
+          $releaseJson = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              throw "Release '$env:RELEASE_TAG' is already published; refusing to replace its assets."
+            }
+
+            gh release upload $env:RELEASE_TAG $env:INSTALLER_PATH $env:CHECKSUM_PATH --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not update draft release assets."
+            }
+          }
+          else {
+            gh release create $env:RELEASE_TAG `
+              $env:INSTALLER_PATH `
+              $env:CHECKSUM_PATH `
+              --verify-tag `
+              --title "CCAutoApprove v$env:RELEASE_VERSION" `
+              --generate-notes `
+              --draft `
+              --prerelease
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not create draft release."
+            }
+          }
