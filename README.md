@@ -18,11 +18,11 @@ Hook 的最早总预算由 CLI 限制为 1000 ms。程序先在内存中构造�
 - 正常使用自包含发布包时无需另装 .NET；从源码构建需要 .NET 10 SDK。
 - 已安装并能正常使用支持 `PermissionRequest` Hook 的 Claude Code。
 
-当前开发环境缺少与框架依赖调试版匹配的桌面运行时，因此没有现场目测验证窗口导航、托盘、第二实例提示及 100%–150% DPI；自包含发布已成功。当前环境也没有 `iscc`，所以没有在本地编译安装脚本，也没有生成 Setup EXE 或执行真实安装/卸载冒烟测试。Windows CI 会安装 Inno Setup 并编译脚本。
+Windows CI 会安装 Inno Setup、编译安装程序并把候选安装包保存为 Artifact。v0.1.0 候选安装包已经完成真实 Windows 安装、启动、Hook 操作、自动批准安全降级和卸载流程的人工验收。
 
 ## 安装
 
-在 CI 或发布流程成功生成安装包后，运行 `artifacts\installer\CCAutoApprove-Setup-<版本>.exe`。安装程序按当前用户安装到 `%LOCALAPPDATA%\Programs\CCAutoApprove`，不要求管理员权限。仓库本身不声称已经发布了可下载的 Setup EXE。
+从 [GitHub Releases](https://github.com/liwenze-NJU/CCAutoApprove/releases) 下载 `CCAutoApprove-Setup-<版本>.exe`。开发者也可以运行 CI 或发布流程，在 `artifacts\installer` 中生成安装包。安装程序按当前用户安装到 `%LOCALAPPDATA%\Programs\CCAutoApprove`，不要求管理员权限。正式附件同时提供 SHA-256 校验文件。
 
 安装完成后启动 CCAutoApprove。Windows 自启动默认关闭，只有你在“设置”中明确开启后才会写入当前用户启动项。
 
@@ -31,13 +31,13 @@ Hook 的最早总预算由 CLI 限制为 1000 ms。程序先在内存中构造�
 1. 打开“设置”，点击“安装 Hook”，再运行“检查”。安装器会合并 `~\.claude\settings.json` 并在写入前创建备份；遇到不支持或损坏的结构会停止，而不是覆盖。
 2. 回到“状态”，选择一个可信项目目录。范围包含该目录及其子目录，不包含相邻目录。
 3. 点击“开启自动批准”。只有 Hook 健康、目录存在、App 进程身份有效且心跳新鲜时才能开启。
-4. 用无害请求进行人工验证。真实的十步 Claude 验收尚未执行；请按“测试”一节运行安全清单并亲自确认。
+4. 用无害请求进行人工验证。v0.1.0 候选版本已经完成“测试”一节所述的真实十步 Claude 验收；新环境和后续版本仍应重新执行安全清单。
 
 ## 日常使用
 
 状态中心显示运行/暂停、所选项目、Hook 状态、心跳和当天批准数量。关闭主窗口会隐藏到系统托盘；要彻底停止，请使用托盘“退出”。需要换项目时先暂停，再选择目录并重新开启。
 
-“暂停”会停止心跳，下一次请求应恢复正常询问。强制结束 App 后，旧心跳最多在 10 秒边界内失效；验证器把达到 10 秒的心跳判为过期。多个 Claude 会话可共享同一个目录范围，但这一真实场景仍待十步人工验收确认。`/clear` 只清理 Claude 会话上下文，不改变 CCAutoApprove 的目录级开关。
+“暂停”会停止心跳，下一次请求应恢复正常询问。强制结束 App 后，旧心跳最多在 10 秒边界内失效；验证器把达到 10 秒的心跳判为过期。多个 Claude 会话共享同一个目录范围以及 `/clear` 后继续按目录生效的行为，均已纳入真实十步人工验收。`/clear` 只清理 Claude 会话上下文，不改变 CCAutoApprove 的目录级开关。
 
 ## 日志隐私等级
 
@@ -64,7 +64,7 @@ Hook 的最早总预算由 CLI 限制为 1000 ms。程序先在内存中构造�
 
 先在 App“设置”中点击“卸载 Hook”，确认 Claude 已恢复正常询问，再从 Windows“已安装的应用”卸载 CCAutoApprove。安装程序卸载时也会尝试移除 Hook 和当前用户启动项；交互卸载会询问是否删除 `%LOCALAPPDATA%\CCAutoApprove` 中的设置、运行状态和日志，静默卸载默认保留用户数据。
 
-由于当前开发环境没有 Inno Setup 编译器，本项目尚未完成真实安装/卸载冒烟验证。卸载后请人工检查 Claude 的正常询问行为。
+v0.1.0 候选安装包已经完成真实安装和卸载验收。卸载程序会尝试清理 Hook、启动项和可选用户数据；卸载后仍应人工确认 Claude 已恢复正常询问。
 
 ## 从源码构建
 
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts/publish.ps1 -Version 0.1.0
 
 自动化测试覆盖 Core 决策、JSON/Windows 适配器、Hook 协议与真实子进程、ViewModel、并发/生命周期和发布布局。测试思想、层级和 fail-safe 矩阵见 [测试指南](docs/testing.md)。
 
-真实 Claude 十步验收尚未运行，不能把自动化测试当成这一步已经通过。请在你准备好备份和恢复真实 Claude 设置后运行：
+v0.1.0 候选版本已经完成真实 Claude 十步验收，包括 Hook 缺失、App 停止、禁用、目录不匹配、自动批准、暂停、强制退出与心跳过期、`/clear`、两个 Claude 会话及卸载 Hook。自动化测试不能替代这项验收；后续候选版本仍应在准备好备份和恢复真实 Claude 设置后运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/manual-acceptance.ps1
