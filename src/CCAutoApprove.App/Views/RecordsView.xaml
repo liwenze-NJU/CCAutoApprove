@@ -1,0 +1,52 @@
+<UserControl x:Class="CCAutoApprove.App.Views.RecordsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+    </UserControl.Resources>
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="2*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,12">
+            <StackPanel>
+                <TextBlock Text="{DynamicResource RecordsTitle}" FontSize="24" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                    <TextBlock Text="{DynamicResource CurrentAuditLevelLabel}" FontWeight="SemiBold" Margin="0,0,6,0" />
+                    <TextBlock Text="{Binding AuditDetailLevelText}" />
+                </StackPanel>
+            </StackPanel>
+            <WrapPanel DockPanel.Dock="Right" HorizontalAlignment="Right">
+                <Button Content="{DynamicResource RefreshRecords}" Command="{Binding RefreshCommand}" Margin="8,0,0,0" Padding="12,6" />
+                <Button Content="{DynamicResource ClearRecords}" Command="{Binding ClearCommand}" Margin="8,0,0,0" Padding="12,6" />
+            </WrapPanel>
+        </DockPanel>
+        <DataGrid Grid.Row="1" ItemsSource="{Binding Records}" SelectedItem="{Binding SelectedRecord}"
+                  AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="{DynamicResource ColumnTime}" Binding="{Binding TimeUtc, StringFormat={}{0:yyyy-MM-dd HH:mm:ss}}" Width="170" />
+                <DataGridTextColumn Header="{DynamicResource ColumnProject}" Binding="{Binding Project}" Width="2*" MinWidth="140" />
+                <DataGridTextColumn Header="{DynamicResource ColumnTool}" Binding="{Binding Tool}" Width="*" MinWidth="100" />
+                <DataGridTextColumn Header="{DynamicResource ColumnDecision}" Binding="{Binding DecisionText}" Width="100" />
+                <DataGridTextColumn Header="{DynamicResource ColumnSource}" Binding="{Binding SourceText}" Width="140" />
+            </DataGrid.Columns>
+        </DataGrid>
+        <TextBlock Grid.Row="2" Text="{DynamicResource DetailsTitle}" FontSize="18" FontWeight="SemiBold" Margin="0,16,0,8" />
+        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto"
+                      Visibility="{Binding ShowDetails, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <StackPanel>
+                <TextBlock Text="{DynamicResource SessionIdLabel}" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding SelectedSessionId}" TextWrapping="Wrap" Margin="0,2,0,8" />
+                <TextBlock Text="{DynamicResource PermissionModeLabel}" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding SelectedPermissionMode}" TextWrapping="Wrap" Margin="0,2,0,8" />
+                <TextBlock Text="{DynamicResource ToolInputLabel}" FontWeight="SemiBold" />
+                <TextBox Text="{Binding SelectedToolInput, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,8" />
+                <TextBlock Text="{DynamicResource PermissionSuggestionsLabel}" FontWeight="SemiBold" />
+                <TextBox Text="{Binding SelectedPermissionSuggestions, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap" Margin="0,2,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>
